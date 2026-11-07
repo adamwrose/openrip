@@ -185,6 +185,12 @@ pub enum Hw {
     VideoToolbox,
     /// NVIDIA NVENC (Linux, Windows).
     Nvenc,
+    /// VAAPI on the given render device, e.g. /dev/dri/renderD128 (Linux; AMD and Intel).
+    Vaapi(&'static str),
+    /// Intel Quick Sync (Linux, Windows).
+    Qsv,
+    /// AMD AMF (Windows).
+    Amf,
 }
 
 impl Hw {
@@ -192,6 +198,9 @@ impl Hw {
         match self {
             Hw::VideoToolbox => "VideoToolbox",
             Hw::Nvenc => "NVIDIA NVENC",
+            Hw::Vaapi(_) => "VAAPI",
+            Hw::Qsv => "Intel Quick Sync",
+            Hw::Amf => "AMD AMF",
         }
     }
 }
@@ -209,19 +218,128 @@ pub fn known_hardware_encoder() -> Option<Hw> {
     HARDWARE.get().copied().flatten()
 }
 
+/// Hardware encoders worth trying on this platform, best first.
+fn candidates() -> Vec<Hw> {
+    if cfg!(target_os = "macos") {
+        return vec![Hw::VideoToolbox];
+    }
+    let mut list = vec![Hw::Nvenc];
+    if cfg!(target_os = "windows") {
+        list.extend([Hw::Amf, Hw::Qsv]);
+    } else {
+        list.extend(vaapi_devices().into_iter().map(Hw::Vaapi));
+        list.push(Hw::Qsv);
+    }
+    list
+}
+
+/// The graphics devices VAAPI could use (Linux render nodes), e.g. /dev/dri/renderD128.
+fn vaapi_devices() -> Vec<&'static str> {
+    let Ok(entries) = std::fs::read_dir("/dev/dri") else { return Vec::new() };
+    let mut nodes: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path().to_string_lossy().into_owned())
+        .filter(|p| p.contains("renderD"))
+        .collect();
+    nodes.sort();
+    // Kept for the life of the program, so `Hw` can stay a plain Copy value.
+    nodes.into_iter().map(|n| &*Box::leak(n.into_boxed_str())).collect()
+}
+
 fn detect_hardware(ffmpeg: &Path) -> Option<Hw> {
+    // macOS always has VideoToolbox; elsewhere each candidate gets a real test encode.
     if cfg!(target_os = "macos") {
         return Some(Hw::VideoToolbox);
     }
-    encoder_works(ffmpeg, "h264_nvenc").then_some(Hw::Nvenc)
+    first_working(candidates(), |hw| hw_works(ffmpeg, hw))
 }
 
-/// Whether FFmpeg can really encode a frame with `encoder` (listing it isn't enough: the
-/// graphics card and driver must support it).
-fn encoder_works(ffmpeg: &Path, encoder: &str) -> bool {
-    Command::new(ffmpeg)
-        .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2"])
-        .args(["-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
+/// The first of `candidates` that `works`, in order; none means software encoding.
+fn first_working(candidates: Vec<Hw>, mut works: impl FnMut(Hw) -> bool) -> Option<Hw> {
+    candidates.into_iter().find(|hw| works(*hw))
+}
+
+/// FFmpeg options that must come before the input, and the video filter and encoder
+/// options a hardware encoder needs.
+fn hw_input_args(hw: Hw) -> Vec<String> {
+    match hw {
+        Hw::Vaapi(device) => vec!["-vaapi_device".into(), device.into()],
+        _ => Vec::new(),
+    }
+}
+
+/// Filter that moves frames onto the graphics card, for encoders that need it.
+fn hw_upload_filter(hw: Hw) -> Option<&'static str> {
+    matches!(hw, Hw::Vaapi(_)).then_some("format=nv12,hwupload")
+}
+
+/// Encoder options for `hw`; `quality` is its constant-quality number (lower is better).
+fn hw_encoder_args(hw: Hw, hevc: bool, q: &Quality) -> Vec<String> {
+    let (vt_q, cq) = match q {
+        Quality::High => ("70", "19"),
+        Quality::Standard => ("58", "23"),
+        Quality::Small => ("45", "28"),
+    };
+    let codec = |h264: &str, h265: &str| (if hevc { h265 } else { h264 }).to_string();
+    let mut a: Vec<String> = match hw {
+        Hw::VideoToolbox => vec!["-c:v".into(), codec("h264_videotoolbox", "hevc_videotoolbox"), "-q:v".into(), vt_q.into()],
+        Hw::Nvenc => vec![
+            "-c:v".into(),
+            codec("h264_nvenc", "hevc_nvenc"),
+            "-preset".into(),
+            "p5".into(),
+            "-rc".into(),
+            "vbr".into(),
+            "-cq".into(),
+            cq.into(),
+            "-b:v".into(),
+            "0".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+        ],
+        Hw::Vaapi(_) => vec!["-c:v".into(), codec("h264_vaapi", "hevc_vaapi"), "-qp".into(), cq.into()],
+        Hw::Qsv => vec![
+            "-c:v".into(),
+            codec("h264_qsv", "hevc_qsv"),
+            "-preset".into(),
+            "medium".into(),
+            "-global_quality".into(),
+            cq.into(),
+            "-pix_fmt".into(),
+            "nv12".into(),
+        ],
+        Hw::Amf => vec![
+            "-c:v".into(),
+            codec("h264_amf", "hevc_amf"),
+            "-quality".into(),
+            "quality".into(),
+            "-rc".into(),
+            "cqp".into(),
+            "-qp_i".into(),
+            cq.into(),
+            "-qp_p".into(),
+            cq.into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+        ],
+    };
+    if hevc {
+        a.extend(["-tag:v".into(), "hvc1".into()]);
+    }
+    a
+}
+
+/// Whether FFmpeg can really encode a frame with `hw` (an encoder being listed isn't
+/// enough: the graphics card and driver must support it).
+fn hw_works(ffmpeg: &Path, hw: Hw) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-nostdin"]).args(hw_input_args(hw));
+    cmd.args(["-f", "lavfi", "-i", "color=black:s=256x256:d=0.2"]);
+    if let Some(filter) = hw_upload_filter(hw) {
+        cmd.args(["-vf", filter]);
+    }
+    cmd.args(hw_encoder_args(hw, false, &Quality::Standard))
+        .args(["-frames:v", "1", "-f", "null", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -234,6 +352,13 @@ fn build_args(job: &Job, s: &Settings, hw: Option<Hw>) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| a.extend(items.iter().map(|x| x.to_string()));
     push(&["-hide_banner", "-nostdin", "-y", "-analyzeduration", "100M", "-probesize", "100M"]);
+    // Only H.264 and HEVC output is encoded in hardware.
+    let hw = hw.filter(|_| s.hardware && matches!(pr.video, Video::H264 | Video::H265));
+    if let Some(hw) = hw {
+        for item in hw_input_args(hw) {
+            push(&[item.as_str()]);
+        }
+    }
     if job.locked.is_some() {
         // Unlocked data arrives on stdin as a transport stream.
         push(&["-fflags", "+genpts", "-f", "mpegts", "-i", "pipe:0"]);
@@ -268,26 +393,24 @@ fn build_args(job: &Job, s: &Settings, hw: Option<Hw>) -> Vec<String> {
     if let Some(h) = cap.filter(|_| !matches!(pr.video, Video::Copy | Video::None)) {
         filters.push(format!("scale=-2:'min({h},ih)'"));
     }
+    if let Some(filter) = hw.and_then(hw_upload_filter) {
+        filters.push(filter.into());
+    }
     if !filters.is_empty() {
         push(&["-vf", &filters.join(",")]);
     }
 
-    let (crf, vt_q, nv_cq) = match s.quality {
-        Quality::High => ("18", "70", "19"),
-        Quality::Standard => ("21", "58", "23"),
-        Quality::Small => ("25", "45", "28"),
+    let crf = match s.quality {
+        Quality::High => "18",
+        Quality::Standard => "21",
+        Quality::Small => "25",
     };
-    let hw = hw.filter(|_| s.hardware);
     match (pr.video, hw) {
-        (Video::H264, Some(Hw::VideoToolbox)) => push(&["-c:v", "h264_videotoolbox", "-q:v", vt_q]),
-        (Video::H264, Some(Hw::Nvenc)) => push(&[
-            "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", nv_cq, "-b:v", "0", "-pix_fmt", "yuv420p",
-        ]),
+        (Video::H264 | Video::H265, Some(hw)) => {
+            let args = hw_encoder_args(hw, pr.video == Video::H265, &s.quality);
+            push(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        }
         (Video::H264, None) => push(&["-c:v", "libx264", "-preset", "medium", "-crf", crf, "-pix_fmt", "yuv420p"]),
-        (Video::H265, Some(Hw::VideoToolbox)) => push(&["-c:v", "hevc_videotoolbox", "-q:v", vt_q, "-tag:v", "hvc1"]),
-        (Video::H265, Some(Hw::Nvenc)) => push(&[
-            "-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", nv_cq, "-b:v", "0", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
-        ]),
         (Video::H265, None) => push(&["-c:v", "libx265", "-preset", "medium", "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]),
         (Video::Mpeg4, _) => push(&["-c:v", "mpeg4", "-q:v", "4", "-vtag", "xvid"]),
         (Video::Copy, _) => push(&["-c:v", "copy"]),
@@ -653,31 +776,129 @@ mod tests {
         assert!(build_args(&job(profile("MP3")), &on, Some(Hw::Nvenc)).contains(&"-vn".to_string()));
     }
 
+    const DEV: &str = "/dev/dri/renderD129";
+
     #[test]
-    fn hw_labels() {
-        assert_eq!(Hw::Nvenc.label(), "NVIDIA NVENC");
-        assert_eq!(Hw::VideoToolbox.label(), "VideoToolbox");
+    fn args_vaapi_uploads_frames_and_names_the_device() {
+        let on = Settings { hardware: true, deinterlace: true, resolution: Resolution::P720, ..settings() };
+        let a = build_args(&job(profile("MP4")), &on, Some(Hw::Vaapi(DEV)));
+        let dev = a.iter().position(|x| x == "-vaapi_device").expect("device");
+        let input = a.iter().position(|x| x == "-i").unwrap();
+        assert_eq!(a[dev + 1], DEV);
+        assert!(dev < input, "device option must come before the input");
+        assert!(has_pair(&a, "-c:v", "h264_vaapi"));
+        assert!(has_pair(&a, "-qp", "23"));
+        let vf = a.iter().position(|x| x == "-vf").unwrap();
+        assert!(a[vf + 1].ends_with(",format=nv12,hwupload"), "{}", a[vf + 1]);
+        assert!(a[vf + 1].starts_with("bwdif"));
+    }
+
+    #[test]
+    fn args_vaapi_filter_present_even_without_other_filters() {
+        let on = Settings { hardware: true, ..settings() };
+        let a = build_args(&job(profile("MP4 HEVC")), &on, Some(Hw::Vaapi(DEV)));
+        assert!(has_pair(&a, "-vf", "format=nv12,hwupload"));
+        assert!(has_pair(&a, "-c:v", "hevc_vaapi"));
+        assert!(has_pair(&a, "-tag:v", "hvc1"));
+    }
+
+    #[test]
+    fn args_qsv_and_amf() {
+        let on = Settings { hardware: true, quality: Quality::High, ..settings() };
+        let a = build_args(&job(profile("MP4")), &on, Some(Hw::Qsv));
+        assert!(has_pair(&a, "-c:v", "h264_qsv"));
+        assert!(has_pair(&a, "-global_quality", "19"));
+        assert!(!a.contains(&"-vaapi_device".to_string()) && !a.contains(&"-vf".to_string()));
+        let a = build_args(&job(profile("MP4 HEVC")), &on, Some(Hw::Qsv));
+        assert!(has_pair(&a, "-c:v", "hevc_qsv") && has_pair(&a, "-tag:v", "hvc1"));
+
+        let a = build_args(&job(profile("MP4")), &on, Some(Hw::Amf));
+        assert!(has_pair(&a, "-c:v", "h264_amf"));
+        assert!(has_pair(&a, "-rc", "cqp"));
+        assert!(has_pair(&a, "-qp_i", "19") && has_pair(&a, "-qp_p", "19"));
+        let a = build_args(&job(profile("MP4 HEVC")), &on, Some(Hw::Amf));
+        assert!(has_pair(&a, "-c:v", "hevc_amf") && has_pair(&a, "-tag:v", "hvc1"));
+    }
+
+    #[test]
+    fn args_vaapi_leaves_other_profiles_alone() {
+        let on = Settings { hardware: true, ..settings() };
+        for name in ["MKV Lossless", "AVI", "MP3"] {
+            let a = build_args(&job(profile(name)), &on, Some(Hw::Vaapi(DEV)));
+            assert!(!a.contains(&"-vaapi_device".to_string()), "{name}");
+            assert!(!a.iter().any(|x| x.contains("hwupload")), "{name}");
+        }
+    }
+
+    #[test]
+    fn first_working_takes_the_first_that_passes_in_order() {
+        let list = vec![Hw::Nvenc, Hw::Vaapi(DEV), Hw::Qsv];
+        let mut tried = Vec::new();
+        let got = first_working(list.clone(), |hw| {
+            tried.push(hw);
+            hw != Hw::Nvenc
+        });
+        assert_eq!(got, Some(Hw::Vaapi(DEV)));
+        assert_eq!(tried, vec![Hw::Nvenc, Hw::Vaapi(DEV)], "stops at the first success");
+        assert_eq!(first_working(list.clone(), |_| true), Some(Hw::Nvenc));
+        assert_eq!(first_working(list, |_| false), None, "none work: software");
+        assert_eq!(first_working(vec![], |_| true), None);
+    }
+
+    #[test]
+    fn candidates_start_with_nvenc_off_macos() {
+        let c = candidates();
+        if cfg!(target_os = "macos") {
+            assert_eq!(c, vec![Hw::VideoToolbox]);
+        } else {
+            assert_eq!(c[0], Hw::Nvenc);
+            assert!(c.contains(&Hw::Qsv));
+            assert_eq!(c.contains(&Hw::Amf), cfg!(target_os = "windows"));
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn encoder_works_follows_ffmpeg_exit_status() {
-        let dir = unique_dir("encoder_works");
+    fn hw_works_vaapi_passes_device_and_upload_filter() {
+        let dir = unique_dir("hw_vaapi");
+        let log = dir.join("args.txt");
+        let ffmpeg = fake_ffmpeg(&dir, &format!("echo \"$@\" > '{}'", log.display()));
+        assert!(hw_works(&ffmpeg, Hw::Vaapi(DEV)));
+        let args = std::fs::read_to_string(&log).unwrap();
+        assert!(args.contains(&format!("-vaapi_device {DEV}")), "{args}");
+        assert!(args.contains("-vf format=nv12,hwupload"), "{args}");
+        assert!(args.contains("-c:v h264_vaapi"), "{args}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hw_labels() {
+        assert_eq!(Hw::Nvenc.label(), "NVIDIA NVENC");
+        assert_eq!(Hw::VideoToolbox.label(), "VideoToolbox");
+        assert_eq!(Hw::Vaapi("/dev/dri/renderD128").label(), "VAAPI");
+        assert_eq!(Hw::Qsv.label(), "Intel Quick Sync");
+        assert_eq!(Hw::Amf.label(), "AMD AMF");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hw_works_follows_ffmpeg_exit_status() {
+        let dir = unique_dir("hw_works");
         let ok = fake_ffmpeg(&dir, "exit 0");
-        assert!(encoder_works(&ok, "h264_nvenc"));
+        assert!(hw_works(&ok, Hw::Nvenc));
         let bad = fake_ffmpeg(&dir, "exit 1");
-        assert!(!encoder_works(&bad, "h264_nvenc"));
-        assert!(!encoder_works(&dir.join("missing"), "h264_nvenc"));
+        assert!(!hw_works(&bad, Hw::Nvenc));
+        assert!(!hw_works(&dir.join("missing"), Hw::Nvenc));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
-    fn encoder_works_asks_for_the_named_encoder() {
-        let dir = unique_dir("encoder_named");
+    fn hw_works_asks_for_the_named_encoder() {
+        let dir = unique_dir("hw_named");
         let ffmpeg = fake_ffmpeg(&dir, "case \"$*\" in *-c:v\\ h264_nvenc*) exit 0;; *) exit 1;; esac");
-        assert!(encoder_works(&ffmpeg, "h264_nvenc"));
-        assert!(!encoder_works(&ffmpeg, "hevc_nvenc"));
+        assert!(hw_works(&ffmpeg, Hw::Nvenc));
+        assert!(!hw_works(&ffmpeg, Hw::Qsv));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
