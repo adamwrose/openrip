@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
@@ -178,7 +178,58 @@ impl Control {
     }
 }
 
-fn args_for(job: &Job, s: &Settings) -> Vec<String> {
+/// A hardware video encoder FFmpeg can use on this computer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hw {
+    /// Apple's VideoToolbox (macOS).
+    VideoToolbox,
+    /// NVIDIA NVENC (Linux, Windows).
+    Nvenc,
+}
+
+impl Hw {
+    pub fn label(self) -> &'static str {
+        match self {
+            Hw::VideoToolbox => "VideoToolbox",
+            Hw::Nvenc => "NVIDIA NVENC",
+        }
+    }
+}
+
+static HARDWARE: OnceLock<Option<Hw>> = OnceLock::new();
+
+/// Which hardware encoder works here. The first call may take a moment (it runs a test
+/// encode); the answer is remembered.
+pub fn hardware_encoder(ffmpeg: &Path) -> Option<Hw> {
+    *HARDWARE.get_or_init(|| detect_hardware(ffmpeg))
+}
+
+/// The answer of `hardware_encoder` if it is already known, without waiting for it.
+pub fn known_hardware_encoder() -> Option<Hw> {
+    HARDWARE.get().copied().flatten()
+}
+
+fn detect_hardware(ffmpeg: &Path) -> Option<Hw> {
+    if cfg!(target_os = "macos") {
+        return Some(Hw::VideoToolbox);
+    }
+    encoder_works(ffmpeg, "h264_nvenc").then_some(Hw::Nvenc)
+}
+
+/// Whether FFmpeg can really encode a frame with `encoder` (listing it isn't enough: the
+/// graphics card and driver must support it).
+fn encoder_works(ffmpeg: &Path, encoder: &str) -> bool {
+    Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2"])
+        .args(["-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn build_args(job: &Job, s: &Settings, hw: Option<Hw>) -> Vec<String> {
     let pr = &job.profile;
     let mut a: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| a.extend(items.iter().map(|x| x.to_string()));
@@ -221,19 +272,26 @@ fn args_for(job: &Job, s: &Settings) -> Vec<String> {
         push(&["-vf", &filters.join(",")]);
     }
 
-    let (crf, vt_q) = match s.quality {
-        Quality::High => ("18", "70"),
-        Quality::Standard => ("21", "58"),
-        Quality::Small => ("25", "45"),
+    let (crf, vt_q, nv_cq) = match s.quality {
+        Quality::High => ("18", "70", "19"),
+        Quality::Standard => ("21", "58", "23"),
+        Quality::Small => ("25", "45", "28"),
     };
-    match pr.video {
-        Video::H264 if s.hardware => push(&["-c:v", "h264_videotoolbox", "-q:v", vt_q]),
-        Video::H264 => push(&["-c:v", "libx264", "-preset", "medium", "-crf", crf, "-pix_fmt", "yuv420p"]),
-        Video::H265 if s.hardware => push(&["-c:v", "hevc_videotoolbox", "-q:v", vt_q, "-tag:v", "hvc1"]),
-        Video::H265 => push(&["-c:v", "libx265", "-preset", "medium", "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]),
-        Video::Mpeg4 => push(&["-c:v", "mpeg4", "-q:v", "4", "-vtag", "xvid"]),
-        Video::Copy => push(&["-c:v", "copy"]),
-        Video::None => push(&["-vn"]),
+    let hw = hw.filter(|_| s.hardware);
+    match (pr.video, hw) {
+        (Video::H264, Some(Hw::VideoToolbox)) => push(&["-c:v", "h264_videotoolbox", "-q:v", vt_q]),
+        (Video::H264, Some(Hw::Nvenc)) => push(&[
+            "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", nv_cq, "-b:v", "0", "-pix_fmt", "yuv420p",
+        ]),
+        (Video::H264, None) => push(&["-c:v", "libx264", "-preset", "medium", "-crf", crf, "-pix_fmt", "yuv420p"]),
+        (Video::H265, Some(Hw::VideoToolbox)) => push(&["-c:v", "hevc_videotoolbox", "-q:v", vt_q, "-tag:v", "hvc1"]),
+        (Video::H265, Some(Hw::Nvenc)) => push(&[
+            "-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", nv_cq, "-b:v", "0", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+        ]),
+        (Video::H265, None) => push(&["-c:v", "libx265", "-preset", "medium", "-crf", crf, "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]),
+        (Video::Mpeg4, _) => push(&["-c:v", "mpeg4", "-q:v", "4", "-vtag", "xvid"]),
+        (Video::Copy, _) => push(&["-c:v", "copy"]),
+        (Video::None, _) => push(&["-vn"]),
     }
     match pr.audio {
         Audio::Aac => push(&["-c:a", "aac", "-b:a", "192k", "-ac", "2"]),
@@ -269,6 +327,7 @@ fn run_one(
     ffmpeg: &Path,
     job: &Job,
     settings: &Settings,
+    hw: Option<Hw>,
     control: &Control,
     tx: &Sender<Msg>,
     wake: &dyn Fn(),
@@ -279,7 +338,7 @@ fn run_one(
         None => None,
     };
     let mut child = Command::new(ffmpeg)
-        .args(args_for(job, settings))
+        .args(build_args(job, settings, hw))
         .stdin(if reader.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -403,6 +462,7 @@ pub fn start(
     wake: impl Fn() + Send + 'static,
 ) {
     std::thread::spawn(move || {
+        let hw = if settings.hardware { hardware_encoder(&ffmpeg) } else { None };
         let mut done = Vec::new();
         for job in &jobs {
             if control.cancel.load(Ordering::SeqCst) {
@@ -410,7 +470,16 @@ pub fn start(
             }
             let _ = tx.send(Msg::Started(job.slot));
             wake();
-            let result = run_one(&ffmpeg, job, &settings, &control, &tx, &wake);
+            let mut result = run_one(&ffmpeg, job, &settings, hw, &control, &tx, &wake);
+            // If the hardware encoder fails part-way (driver trouble, unsupported input),
+            // quietly try again in software.
+            if settings.hardware
+                && hw.is_some()
+                && !control.cancel.load(Ordering::SeqCst)
+                && matches!(&result, Err(e) if e != "Stopped")
+            {
+                result = run_one(&ffmpeg, job, &settings, None, &control, &tx, &wake);
+            }
             if let Ok(p) = &result {
                 done.push(p.clone());
             }
@@ -429,6 +498,10 @@ pub fn start(
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    fn args_for(job: &Job, s: &Settings) -> Vec<String> {
+        build_args(job, s, None)
+    }
 
     fn profile(name: &str) -> Profile {
         *PROFILES.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("no profile {name}"))
@@ -522,22 +595,90 @@ mod tests {
     }
 
     #[test]
-    fn args_quality_maps_to_hardware_q() {
+    fn args_videotoolbox_quality() {
         for (q, v) in [(Quality::High, "70"), (Quality::Standard, "58"), (Quality::Small, "45")] {
             let s = Settings { quality: q, hardware: true, ..settings() };
-            let a = args_for(&job(profile("MP4")), &s);
+            let a = build_args(&job(profile("MP4")), &s, Some(Hw::VideoToolbox));
             assert!(has_pair(&a, "-c:v", "h264_videotoolbox"));
             assert!(has_pair(&a, "-q:v", v));
+        }
+        let a = build_args(&job(profile("MP4 HEVC")), &Settings { hardware: true, ..settings() }, Some(Hw::VideoToolbox));
+        assert!(has_pair(&a, "-c:v", "hevc_videotoolbox"));
+    }
+
+    #[test]
+    fn args_nvenc_h264_quality() {
+        for (q, cq) in [(Quality::High, "19"), (Quality::Standard, "23"), (Quality::Small, "28")] {
+            let s = Settings { quality: q, hardware: true, ..settings() };
+            let a = build_args(&job(profile("MP4")), &s, Some(Hw::Nvenc));
+            assert!(has_pair(&a, "-c:v", "h264_nvenc"));
+            assert!(has_pair(&a, "-cq", cq));
+            assert!(has_pair(&a, "-b:v", "0"));
+            assert!(has_pair(&a, "-pix_fmt", "yuv420p"));
+            assert!(!a.contains(&"-crf".to_string()));
         }
     }
 
     #[test]
-    fn args_hevc_software_and_hardware() {
-        let a = args_for(&job(profile("MP4 HEVC")), &settings());
-        assert!(has_pair(&a, "-c:v", "libx265"));
+    fn args_nvenc_hevc_is_tagged_for_apple_players() {
+        let a = build_args(&job(profile("MP4 HEVC")), &Settings { hardware: true, ..settings() }, Some(Hw::Nvenc));
+        assert!(has_pair(&a, "-c:v", "hevc_nvenc"));
         assert!(has_pair(&a, "-tag:v", "hvc1"));
-        let a = args_for(&job(profile("MP4 HEVC")), &Settings { hardware: true, ..settings() });
-        assert!(has_pair(&a, "-c:v", "hevc_videotoolbox"));
+    }
+
+    #[test]
+    fn args_nvenc_keeps_software_filters() {
+        let s = Settings { hardware: true, deinterlace: true, resolution: Resolution::P720, ..settings() };
+        let a = build_args(&job(profile("MP4")), &s, Some(Hw::Nvenc));
+        assert!(a.iter().any(|x| x.starts_with("bwdif") && x.contains("scale=-2:'min(720,ih)'")));
+    }
+
+    #[test]
+    fn args_hardware_off_or_unavailable_uses_software() {
+        let on = Settings { hardware: true, ..settings() };
+        let a = build_args(&job(profile("MP4")), &on, None);
+        assert!(has_pair(&a, "-c:v", "libx264"));
+        let off = Settings { hardware: false, ..settings() };
+        let a = build_args(&job(profile("MP4")), &off, Some(Hw::Nvenc));
+        assert!(has_pair(&a, "-c:v", "libx264"));
+        let a = build_args(&job(profile("MP4 HEVC")), &off, Some(Hw::VideoToolbox));
+        assert!(has_pair(&a, "-c:v", "libx265"));
+    }
+
+    #[test]
+    fn args_hardware_does_not_touch_copy_or_audio_profiles() {
+        let on = Settings { hardware: true, ..settings() };
+        assert!(has_pair(&build_args(&job(profile("MKV Lossless")), &on, Some(Hw::Nvenc)), "-c:v", "copy"));
+        assert!(has_pair(&build_args(&job(profile("AVI")), &on, Some(Hw::Nvenc)), "-c:v", "mpeg4"));
+        assert!(build_args(&job(profile("MP3")), &on, Some(Hw::Nvenc)).contains(&"-vn".to_string()));
+    }
+
+    #[test]
+    fn hw_labels() {
+        assert_eq!(Hw::Nvenc.label(), "NVIDIA NVENC");
+        assert_eq!(Hw::VideoToolbox.label(), "VideoToolbox");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoder_works_follows_ffmpeg_exit_status() {
+        let dir = unique_dir("encoder_works");
+        let ok = fake_ffmpeg(&dir, "exit 0");
+        assert!(encoder_works(&ok, "h264_nvenc"));
+        let bad = fake_ffmpeg(&dir, "exit 1");
+        assert!(!encoder_works(&bad, "h264_nvenc"));
+        assert!(!encoder_works(&dir.join("missing"), "h264_nvenc"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoder_works_asks_for_the_named_encoder() {
+        let dir = unique_dir("encoder_named");
+        let ffmpeg = fake_ffmpeg(&dir, "case \"$*\" in *-c:v\\ h264_nvenc*) exit 0;; *) exit 1;; esac");
+        assert!(encoder_works(&ffmpeg, "h264_nvenc"));
+        assert!(!encoder_works(&ffmpeg, "hevc_nvenc"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

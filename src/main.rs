@@ -248,6 +248,14 @@ impl RipperApp {
         let ffmpeg = disc::find_tool("ffmpeg")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Look for a hardware encoder in the background; the settings show it once found.
+        if let Some(path) = disc::find_tool("ffmpeg") {
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                rip::hardware_encoder(&path);
+                ctx.request_repaint();
+            });
+        }
         let out_dir = default_output_dir().to_string_lossy().into_owned();
         let (load_tx, load_rx) = channel();
         let mut app = Self {
@@ -268,6 +276,7 @@ impl RipperApp {
             settings: rip::Settings {
                 resolution: Resolution::Source,
                 quality: Quality::High,
+                // Used only where a hardware encoder is found (see rip::hardware_encoder).
                 hardware: true,
                 deinterlace: true,
             },
@@ -1454,9 +1463,12 @@ fn quality_controls(ui: &mut egui::Ui, s: &mut rip::Settings, p: &Palette) {
             }
         });
         ui.end_row();
-        ui.label(RichText::new("Speed").color(p.muted));
-        ui.checkbox(&mut s.hardware, "Use hardware acceleration (much faster)");
-        ui.end_row();
+        // Only offered once a working hardware encoder has been found.
+        if let Some(hw) = rip::known_hardware_encoder() {
+            ui.label(RichText::new("Speed").color(p.muted));
+            ui.checkbox(&mut s.hardware, format!("Use hardware acceleration: {} (much faster)", hw.label()));
+            ui.end_row();
+        }
         ui.label(RichText::new("Picture").color(p.muted));
         ui.checkbox(&mut s.deinterlace, "Remove interlacing lines (recommended for DVD)");
         ui.end_row();
@@ -1574,7 +1586,7 @@ mod unlock_tests {
             profile: PROFILES[0],
             locked: t.locked.clone().zip(t.playlist),
         };
-        let settings = rip::Settings { resolution: Resolution::P720, quality: Quality::Small, hardware: cfg!(target_os = "macos"), deinterlace: false };
+        let settings = rip::Settings { resolution: Resolution::P720, quality: Quality::Small, hardware: true, deinterlace: false };
         rip::start(ffmpeg.clone(), vec![job], settings, None, rip::Control::default(), tx, || {});
         let mut result = None;
         for msg in rx.iter() {
