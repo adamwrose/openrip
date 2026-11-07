@@ -1,7 +1,7 @@
 ; Inno Setup script for the OpenRip Windows installer.
 ; Built in CI (see .github/workflows/build.yml) with:
 ;   iscc /DAppVersion=0.1.0 /DSourceDir=<folder holding all the files> installer\openrip.iss
-; SourceDir must contain: disc-ripper.exe, ffmpeg.exe, ffprobe.exe, the libbluray / libaacs
+; SourceDir must contain: openrip.exe, ffmpeg.exe, ffprobe.exe, the libbluray / libaacs
 ; DLLs (and their dependencies), a licenses\ folder, and README.md.
 
 #ifndef AppVersion
@@ -19,7 +19,7 @@ AppPublisher=OpenRip
 DefaultDirName={autopf}\OpenRip
 DefaultGroupName=OpenRip
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\disc-ripper.exe
+UninstallDisplayIcon={app}\openrip.exe
 OutputDir=output
 OutputBaseFilename=OpenRip-{#AppVersion}-setup
 Compression=lzma2
@@ -41,7 +41,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; The app, FFmpeg, and the Blu-ray libraries all sit in one folder, which is where OpenRip
 ; looks for them first.
-Source: "{#SourceDir}\disc-ripper.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\openrip.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -54,8 +54,8 @@ Source: "THIRD-PARTY.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Name: "{userappdata}\aacs"
 
 [Icons]
-Name: "{group}\OpenRip"; Filename: "{app}\disc-ripper.exe"
-Name: "{autodesktop}\OpenRip"; Filename: "{app}\disc-ripper.exe"; Tasks: desktopicon
+Name: "{group}\OpenRip"; Filename: "{app}\openrip.exe"
+Name: "{autodesktop}\OpenRip"; Filename: "{app}\openrip.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\disc-ripper.exe"; Description: "{cm:LaunchProgram,OpenRip}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\openrip.exe"; Description: "{cm:LaunchProgram,OpenRip}"; Flags: nowait postinstall skipifsilent

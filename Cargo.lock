@@ -732,17 +732,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "disc-ripper"
-version = "0.2.0"
-dependencies = [
- "cpal",
- "eframe",
- "image",
- "libloading 0.9.0",
- "rfd",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2312,6 +2301,17 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "openrip"
+version = "0.2.0"
+dependencies = [
+ "cpal",
+ "eframe",
+ "image",
+ "libloading 0.9.0",
+ "rfd",
+]
 
 [[package]]
 name = "orbclient"

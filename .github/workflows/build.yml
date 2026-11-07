@@ -63,7 +63,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir dist
-          cp target/${{ matrix.target }}/release/disc-ripper dist/
+          cp target/${{ matrix.target }}/release/openrip dist/
           cp README.md dist/
           tar -czf openrip-${{ matrix.name }}.tar.gz -C dist .
       - name: Package (Windows)
@@ -71,7 +71,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/disc-ripper.exe dist/
+          Copy-Item target/${{ matrix.target }}/release/openrip.exe dist/
           Copy-Item README.md dist/
           Compress-Archive -Path dist/* -DestinationPath openrip-${{ matrix.name }}.zip
       - uses: actions/upload-artifact@v4
@@ -135,7 +135,7 @@ jobs:
       - name: Check the folder has everything
         shell: pwsh
         run: |
-          foreach ($f in "disc-ripper.exe", "ffmpeg.exe", "ffprobe.exe") {
+          foreach ($f in "openrip.exe", "ffmpeg.exe", "ffprobe.exe") {
             if (-not (Test-Path "dist/$f")) { throw "missing $f" }
           }
           if (-not (Get-ChildItem dist -Filter "libbluray*.dll")) { throw "missing libbluray" }

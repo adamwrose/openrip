@@ -549,7 +549,7 @@ fn run_one(
 }
 
 fn merge(ffmpeg: &Path, parts: &[PathBuf], out: &Path) -> Result<PathBuf, String> {
-    let list = std::env::temp_dir().join(format!("disc-ripper-merge-{}.txt", std::process::id()));
+    let list = std::env::temp_dir().join(format!("openrip-merge-{}.txt", std::process::id()));
     let body: String = parts
         .iter()
         .map(|p| format!("file '{}'\n", crate::disc::path_for_ffmpeg(p).replace('\'', "'\\''")))
