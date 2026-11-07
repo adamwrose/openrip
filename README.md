@@ -8,6 +8,24 @@ An open-source DVD and Blu-ray ripper with a friendly interface, powered by FFmp
 - Rust (2024 edition) to build from source: `cargo run --release`
 - On Linux, `udisks2` to open ISO images
 
+## Command line
+
+Run `openrip` with no arguments to open the window, or use it from a terminal:
+
+```
+openrip list <disc>                    # show the titles, main movie marked with *
+openrip list <disc> --details          # also probe picture size, audio and subtitle tracks
+openrip rip <disc>                     # rip the main movie as MP4
+openrip rip <disc> --title 1,3 --profile mkv-hevc --out ~/Videos --quality small
+openrip rip <disc> --all --merge       # every title, plus one joined file
+openrip profiles                       # the output formats
+```
+
+`<disc>` is a mounted disc, a `VIDEO_TS` or `BDMV` folder, or an `.iso` file. Other options:
+`--resolution`, `--audio N`, `--subtitles`, `--no-deinterlace`, `--no-hardware`,
+`--ffmpeg PATH`. See `openrip --help`. Saved file paths go to stdout and progress to stderr;
+the exit status is 0 on success, 1 if a title failed, 2 for a bad command line.
+
 ## Hardware acceleration
 
 On start-up OpenRip test-encodes with each hardware encoder FFmpeg offers and uses the

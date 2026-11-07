@@ -3,6 +3,7 @@
 //! The ripping itself is done by FFmpeg.
 
 mod bluray;
+mod cli;
 mod disc;
 mod preview;
 mod rip;
@@ -36,8 +37,12 @@ fn default_output_dir() -> PathBuf {
 }
 
 fn main() -> eframe::Result {
-    bluray::init();
     let args: Vec<String> = std::env::args().collect();
+    // `openrip list|rip|profiles|--help ...` runs in the terminal instead of opening the window.
+    if let Some(code) = cli::run(&args[1..]) {
+        std::process::exit(code);
+    }
+    bluray::init();
     let screenshot = args
         .iter()
         .position(|a| a == "--screenshot")

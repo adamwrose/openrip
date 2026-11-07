@@ -32,7 +32,7 @@ enum Audio {
     Copy,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Profile {
     pub name: &'static str,
     pub note: &'static str,
