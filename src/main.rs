@@ -19,6 +19,21 @@ use std::sync::Arc;
 
 const APP_NAME: &str = "OpenRip";
 
+fn default_output_dir() -> PathBuf {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let base = home.unwrap_or_else(|| PathBuf::from("."));
+
+    #[cfg(target_os = "macos")]
+    let videos = "Movies";
+    #[cfg(not(target_os = "macos"))]
+    let videos = "Videos";
+
+    base.join(videos).join(APP_NAME)
+}
+
 fn main() -> eframe::Result {
     bluray::init();
     let args: Vec<String> = std::env::args().collect();
@@ -233,11 +248,7 @@ impl RipperApp {
         let ffmpeg = disc::find_tool("ffmpeg")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let out_dir = std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Movies").join(APP_NAME))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .to_string_lossy()
-            .into_owned();
+        let out_dir = default_output_dir().to_string_lossy().into_owned();
         let (load_tx, load_rx) = channel();
         let mut app = Self {
             dark: false,
@@ -443,14 +454,16 @@ impl RipperApp {
                 });
             }
             if ok > 0 && self.open_after {
-                let _ = std::process::Command::new("open").arg(&self.out_dir).spawn();
+                if let Err(e) = disc::open_location(Path::new(&self.out_dir), false) {
+                    self.message = Some((false, format!("Couldn't open the output folder: {e}")));
+                }
             }
         }
     }
 
     fn start_rip(&mut self, ctx: &egui::Context) {
         let Some(ffmpeg) = self.ffmpeg() else {
-            self.message = Some((false, "FFmpeg wasn't found. Install it (brew install ffmpeg) or set its location in Settings.".into()));
+            self.message = Some((false, "FFmpeg wasn't found. Install FFmpeg with your package manager or set its location in Settings.".into()));
             return;
         };
         let Some(disc) = &self.disc else { return };
@@ -722,8 +735,14 @@ impl RipperApp {
                         }
                     }
                     if ui.button("Open folder").clicked() {
-                        let _ = std::fs::create_dir_all(&self.out_dir);
-                        let _ = std::process::Command::new("open").arg(&self.out_dir).spawn();
+                        match std::fs::create_dir_all(&self.out_dir) {
+                            Ok(()) => {
+                                if let Err(e) = disc::open_location(Path::new(&self.out_dir), false) {
+                                    self.message = Some((false, format!("Couldn't open the output folder: {e}")));
+                                }
+                            }
+                            Err(e) => self.message = Some((false, format!("Couldn't create the output folder: {e}"))),
+                        }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.ripping {
@@ -853,7 +872,7 @@ impl RipperApp {
                 .inner_margin(Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("FFmpeg (the free engine that does the ripping) wasn't found. Install it with Homebrew: brew install ffmpeg — or set its place in Settings.").color(p.bad));
+                        ui.label(RichText::new("FFmpeg (the free engine that does the ripping) wasn't found. Install it with your package manager or set its location in Settings.").color(p.bad));
                     });
                 });
             ui.add_space(6.0);
@@ -1122,8 +1141,10 @@ impl RipperApp {
                                     }
                                     RowState::Done(path) => {
                                         let r = ui.label(RichText::new(format!("✔ Saved {}", file_name(path))).color(p.good));
-                                        if r.on_hover_text("Show in Finder").clicked() {
-                                            let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+                                        if r.on_hover_text("Show in file manager").clicked() {
+                                            if let Err(e) = disc::open_location(path, true) {
+                                                self.message = Some((false, format!("Couldn't show the saved file: {e}")));
+                                            }
                                         }
                                     }
                                     RowState::Failed(e) => {
@@ -1358,7 +1379,7 @@ impl RipperApp {
                 if self.ffmpeg().is_some() {
                     ui.label(RichText::new("✔ FFmpeg found").color(p.good));
                 } else {
-                    ui.label(RichText::new("✖ Not found. Install with: brew install ffmpeg").color(p.bad));
+                    ui.label(RichText::new("✖ Not found. Install FFmpeg with your package manager.").color(p.bad));
                 }
             });
             card(ui, p, "Video quality", |ui| quality_controls(ui, &mut self.settings, p));

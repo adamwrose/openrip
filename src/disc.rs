@@ -79,15 +79,27 @@ impl Title {
     /// What to hand FFmpeg as input: one file, or the concat protocol for VOB runs.
     pub fn input(&self) -> String {
         if self.files.len() == 1 {
-            self.files[0].to_string_lossy().into_owned()
+            path_for_ffmpeg(&self.files[0])
         } else {
             let parts: Vec<String> = self
                 .files
                 .iter()
-                .map(|f| f.to_string_lossy().into_owned())
+                .map(|f| path_for_ffmpeg(f))
                 .collect();
             format!("concat:{}", parts.join("|"))
         }
+    }
+}
+
+pub fn path_for_ffmpeg(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.into_owned()
     }
 }
 
@@ -121,14 +133,40 @@ pub struct MountedDisc {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    // Apps started from Finder don't get the shell's PATH, so look in the usual places too.
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
         dirs.push(PathBuf::from(d));
     }
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    #[cfg(target_os = "linux")]
+    for d in ["/usr/local/bin", "/usr/bin", "/bin"] {
+        dirs.push(PathBuf::from(d));
+    }
+    #[cfg(target_os = "windows")]
+    for d in [
+        std::env::var_os("ProgramFiles").map(PathBuf::from).map(|p| p.join("FFmpeg/bin")),
+        std::env::var_os("ProgramFiles(x86)").map(PathBuf::from).map(|p| p.join("FFmpeg/bin")),
+    ].into_iter().flatten() {
+        dirs.push(d);
+    }
+
+    let names = if cfg!(windows) && Path::new(name).extension().is_none() {
+        vec![name.to_string(), format!("{name}.exe")]
+    } else {
+        vec![name.to_string()]
+    };
+    for dir in dirs {
+        for candidate in &names {
+            let path = dir.join(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 pub fn find_tool(name: &str) -> Option<PathBuf> {
@@ -137,7 +175,7 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
 
 /// The ffprobe next to the chosen ffmpeg, or any ffprobe we can find.
 pub fn ffprobe_for(ffmpeg: &Path) -> Option<PathBuf> {
-    let sibling = ffmpeg.with_file_name("ffprobe");
+    let sibling = ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
     if sibling.is_file() { Some(sibling) } else { which("ffprobe") }
 }
 
@@ -153,22 +191,52 @@ fn kind_of(root: &Path) -> Option<DiscKind> {
 
 /// Discs (and disc images) currently mounted on this computer.
 pub fn mounted_discs() -> Vec<MountedDisc> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    roots.push(PathBuf::from("/Volumes"));
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(user) = std::env::var_os("USER") {
+            roots.push(PathBuf::from("/media").join(&user));
+            roots.push(PathBuf::from("/run/media").join(user));
+        }
+        roots.push(PathBuf::from("/mnt"));
+    }
+    #[cfg(target_os = "windows")]
+    for letter in b'A'..=b'Z' {
+        roots.push(PathBuf::from(format!("{}:\\", letter as char)));
+    }
+
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/Volumes") else { return out };
-    for e in entries.flatten() {
-        let path = e.path();
-        if let Some(kind) = kind_of(&path) {
-            out.push(MountedDisc {
-                name: e.file_name().to_string_lossy().into_owned(),
-                path,
-                kind,
-            });
+    for root in roots {
+        #[cfg(windows)]
+        {
+            if let Some(kind) = kind_of(&root) {
+                let name = root.to_string_lossy().trim_end_matches('\\').trim_end_matches('/').to_string();
+                out.push(MountedDisc { name, path: root, kind });
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let Ok(entries) = std::fs::read_dir(&root) else { continue };
+            for e in entries.flatten() {
+                let path = e.path();
+                if let Some(kind) = kind_of(&path) {
+                    out.push(MountedDisc {
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        path,
+                        kind,
+                    });
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.path == b.path);
     out
 }
 
+#[cfg(target_os = "macos")]
 fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
     let out = Command::new("hdiutil")
         .args(["attach", "-readonly", "-nobrowse"])
@@ -188,6 +256,99 @@ fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
         .find(|p| p.starts_with('/'))
         .map(PathBuf::from)
         .ok_or_else(|| "The image mounted but no folder appeared.".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
+    let loop_device = Command::new("udisksctl")
+        .args(["loop-setup", "--file"])
+        .arg(iso)
+        .arg("--no-user-interaction")
+        .output()
+        .map_err(|e| format!("Couldn't mount the image (install udisks2): {e}"))?;
+    if !loop_device.status.success() {
+        return Err(format!("Couldn't set up the image: {}", String::from_utf8_lossy(&loop_device.stderr).trim()));
+    }
+    let output = String::from_utf8_lossy(&loop_device.stdout);
+    let device = output
+        .split(" as ")
+        .nth(1)
+        .and_then(|s| s.trim().trim_end_matches('.').split_whitespace().next())
+        .ok_or_else(|| "The image was set up but no loop device was reported.".to_string())?;
+    let mounted = Command::new("udisksctl")
+        .args(["mount", "--block-device", device, "--no-user-interaction"])
+        .output()
+        .map_err(|e| format!("Couldn't mount the image: {e}"))?;
+    if !mounted.status.success() {
+        return Err(format!("Couldn't mount the image: {}", String::from_utf8_lossy(&mounted.stderr).trim()));
+    }
+    String::from_utf8_lossy(&mounted.stdout)
+        .split(" at ")
+        .nth(1)
+        .map(str::trim)
+        .map(PathBuf::from)
+        .ok_or_else(|| "The image mounted but no folder was reported.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
+    let image = iso.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         try {{ \
+           $image = Mount-DiskImage -ImagePath '{image}' -PassThru; \
+           $volume = $image | Get-Volume | Where-Object DriveLetter | Select-Object -First 1; \
+           if ($volume) {{ $volume.DriveLetter }} \
+         }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}"
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| format!("Couldn't mount the image with Windows PowerShell: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("Couldn't mount the image: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let letter = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if letter.is_empty() {
+        return Err("The image mounted but Windows didn't assign it a drive letter.".into());
+    }
+    Ok(PathBuf::from(format!("{letter}:\\")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn mount_iso(_iso: &Path) -> Result<PathBuf, String> {
+    Err("Mounting ISO images isn't supported on this platform.".into())
+}
+
+/// Open a directory, or reveal a file, in the platform's file manager.
+pub fn open_location(path: &Path, reveal: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        if reveal {
+            c.arg("-R");
+        }
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("explorer.exe");
+        if reveal {
+            c.arg("/select,").arg(path);
+        } else {
+            c.arg(path);
+        }
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let target = if reveal { path.parent().unwrap_or(path) } else { path };
+        let mut c = Command::new("xdg-open");
+        c.arg(target);
+        c
+    };
+    command.spawn().map(|_| ()).map_err(|e| format!("Couldn't open the file manager: {e}"))
 }
 
 /// Read a disc from a mounted volume, a VIDEO_TS/BDMV folder (or its parent) or an ISO file.

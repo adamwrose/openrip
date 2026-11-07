@@ -1,5 +1,5 @@
 //! Reading copy-protected Blu-rays through libbluray and libaacs (both open source), when
-//! they are installed (Homebrew: libbluray, libaacs) together with the person's own key
+//! they are installed together with the person's own key
 //! file (keydb.cfg). The libraries are loaded at run time, so the app works without them.
 
 use libloading::{Library, Symbol};
@@ -7,30 +7,94 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const LIB_DIRS: [&str; 3] = ["/opt/homebrew/lib", "/usr/local/lib", "/opt/local/lib"];
+#[cfg(target_os = "macos")]
+const BLURAY_LIBS: &[&str] = &["libbluray.dylib", "libbluray.2.dylib"];
+#[cfg(target_os = "linux")]
+const BLURAY_LIBS: &[&str] = &["libbluray.so.2", "libbluray.so"];
+#[cfg(target_os = "windows")]
+const BLURAY_LIBS: &[&str] = &["libbluray-2.dll", "libbluray.dll"];
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const BLURAY_LIBS: &[&str] = &[];
 
-fn find_lib(file: &str) -> Option<PathBuf> {
-    LIB_DIRS.iter().map(|d| Path::new(d).join(file)).find(|p| p.exists())
+#[cfg(target_os = "macos")]
+const AACS_LIBS: &[&str] = &["libaacs.0.dylib", "libaacs.dylib"];
+#[cfg(target_os = "linux")]
+const AACS_LIBS: &[&str] = &["libaacs.so.0", "libaacs.so"];
+#[cfg(target_os = "windows")]
+const AACS_LIBS: &[&str] = &["libaacs-0.dll", "libaacs.dll"];
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const AACS_LIBS: &[&str] = &[];
+
+#[cfg(target_os = "macos")]
+const BDPLUS_LIBS: &[&str] = &["libbdplus.0.dylib", "libbdplus.dylib"];
+
+fn find_lib(files: &[&str]) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    dirs.extend(["/opt/homebrew/lib", "/usr/local/lib", "/opt/local/lib"].map(PathBuf::from));
+    #[cfg(target_os = "linux")]
+    dirs.extend([
+        "/usr/local/lib",
+        "/usr/local/lib64",
+        "/lib",
+        "/lib64",
+        "/lib/x86_64-linux-gnu",
+        "/lib/aarch64-linux-gnu",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ].map(PathBuf::from));
+    #[cfg(target_os = "windows")]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    dirs.iter()
+        .flat_map(|d| files.iter().map(move |f| d.join(f)))
+        .find(|p| p.is_file())
 }
 
 /// Where libaacs looks for the key file.
 fn keydb_paths() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
-    vec![
-        home.join("Library/Preferences/aacs/keydb.cfg"),
-        home.join("Library/Preferences/aacs/KEYDB.cfg"),
-        home.join(".config/aacs/keydb.cfg"),
-        home.join(".config/aacs/KEYDB.cfg"),
-    ]
+    #[cfg(windows)]
+    let home = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(home) = home else { return Vec::new() };
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            home.join("Library/Preferences/aacs/keydb.cfg"),
+            home.join("Library/Preferences/aacs/KEYDB.cfg"),
+            home.join(".config/aacs/keydb.cfg"),
+            home.join(".config/aacs/KEYDB.cfg"),
+        ]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![home.join(".config/aacs/keydb.cfg"), home.join(".config/aacs/KEYDB.cfg")]
+    }
+    #[cfg(windows)]
+    {
+        vec![home.join("aacs/keydb.cfg"), home.join("aacs/KEYDB.cfg")]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Vec::new()
+    }
 }
 
 /// Tell libbluray where libaacs and libbdplus are. Call once at start, before any threads.
 pub fn init() {
-    // libbluray adds ".<version>.dylib" itself, so give the path without it.
-    for (var, file) in [("LIBAACS_PATH", "libaacs.0.dylib"), ("LIBBDPLUS_PATH", "libbdplus.0.dylib")] {
+    #[cfg(target_os = "macos")]
+    for (var, files) in [("LIBAACS_PATH", AACS_LIBS), ("LIBBDPLUS_PATH", BDPLUS_LIBS)] {
         if std::env::var_os(var).is_none() {
-            if let Some(p) = find_lib(file) {
-                let base = p.to_string_lossy().trim_end_matches(".0.dylib").to_string();
+            if let Some(p) = find_lib(files) {
+                let base = p.to_string_lossy().trim_end_matches(".dylib").trim_end_matches(".0").to_string();
                 // SAFETY: called from main before any other thread starts.
                 unsafe { std::env::set_var(var, base) };
             }
@@ -41,14 +105,14 @@ pub fn init() {
 /// What's missing to unlock protected Blu-rays (empty when everything is in place).
 pub fn missing() -> Vec<&'static str> {
     let mut m = Vec::new();
-    if find_lib("libbluray.dylib").is_none() && find_lib("libbluray.2.dylib").is_none() {
-        m.push("libbluray (brew install libbluray)");
+    if find_lib(BLURAY_LIBS).is_none() {
+        m.push("libbluray");
     }
-    if find_lib("libaacs.0.dylib").is_none() {
-        m.push("libaacs (brew install libaacs)");
+    if find_lib(AACS_LIBS).is_none() {
+        m.push("libaacs");
     }
     if !keydb_paths().iter().any(|p| p.is_file()) {
-        m.push("a key file, keydb.cfg, in ~/Library/Preferences/aacs/");
+        m.push("a key file, keydb.cfg, in the platform's AACS config folder");
     }
     m
 }
@@ -56,10 +120,7 @@ pub fn missing() -> Vec<&'static str> {
 fn library() -> Result<&'static Library, String> {
     static LIB: OnceLock<Result<Library, String>> = OnceLock::new();
     LIB.get_or_init(|| {
-        let path = ["libbluray.dylib", "libbluray.2.dylib"]
-            .iter()
-            .find_map(|f| find_lib(f))
-            .ok_or("libbluray isn't installed (brew install libbluray).")?;
+        let path = find_lib(BLURAY_LIBS).ok_or("libbluray isn't installed.")?;
         // SAFETY: loading a well-known C library; its initialisers have no preconditions.
         unsafe { Library::new(&path) }.map_err(|e| format!("Couldn't load libbluray: {e}"))
     })

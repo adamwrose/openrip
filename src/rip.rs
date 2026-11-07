@@ -168,6 +168,11 @@ impl Control {
         self.cancel.store(true, Ordering::SeqCst);
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+            #[cfg(unix)]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         }
     }
@@ -365,7 +370,7 @@ fn merge(ffmpeg: &Path, parts: &[PathBuf], out: &Path) -> Result<PathBuf, String
     let list = std::env::temp_dir().join(format!("disc-ripper-merge-{}.txt", std::process::id()));
     let body: String = parts
         .iter()
-        .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
+        .map(|p| format!("file '{}'\n", crate::disc::path_for_ffmpeg(p).replace('\'', "'\\''")))
         .collect();
     std::fs::write(&list, body).map_err(|e| e.to_string())?;
     let out_status = Command::new(ffmpeg)
