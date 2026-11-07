@@ -1595,3 +1595,53 @@ mod unlock_tests {
         assert!((secs - t.duration.unwrap()).abs() < 5.0);
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn default_output_dir_is_app_folder_under_videos() {
+        let dir = default_output_dir();
+        assert_eq!(dir.file_name().unwrap(), APP_NAME);
+        let parent = dir.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        if cfg!(target_os = "macos") {
+            assert_eq!(parent, "Movies");
+        } else {
+            assert_eq!(parent, "Videos");
+        }
+    }
+
+    #[test]
+    fn file_name_returns_last_component() {
+        assert_eq!(file_name(Path::new("/a/b/movie.mkv")), "movie.mkv");
+        assert_eq!(file_name(Path::new("movie.mkv")), "movie.mkv");
+        assert_eq!(file_name(Path::new("/a/b/")), "b");
+    }
+
+    #[test]
+    fn file_name_empty_for_root() {
+        assert_eq!(file_name(Path::new("/")), "");
+        assert_eq!(file_name(Path::new("")), "");
+    }
+
+    #[test]
+    fn palettes_differ_between_light_and_dark() {
+        let (light, dark) = (palette(false), palette(true));
+        assert_ne!(light.bg, dark.bg);
+        assert_ne!(light.text, dark.text);
+        assert_eq!(light.accent, ACCENT);
+        assert_ne!(dark.accent, ACCENT);
+    }
+
+    #[test]
+    fn palette_text_contrasts_with_background() {
+        fn luma(c: Color32) -> f32 {
+            0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32
+        }
+        let light = palette(false);
+        assert!(luma(light.text) < luma(light.bg));
+        let dark = palette(true);
+        assert!(luma(dark.text) > luma(dark.bg));
+    }
+}

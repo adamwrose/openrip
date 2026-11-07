@@ -685,3 +685,462 @@ pub fn human_time(secs: f64) -> String {
     let s = secs.max(0.0).round() as u64;
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A fresh empty directory under the system temp dir, removed on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("openrip-unit-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn touch(path: &Path, bytes: usize) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![0u8; bytes]).unwrap();
+    }
+
+    /// Build a minimal .mpls file with the given (clip, in, out) items.
+    fn mpls(items: &[(&str, u32, u32)]) -> Vec<u8> {
+        let start = 20u32;
+        let mut d = b"MPLS0200".to_vec();
+        d.extend(start.to_be_bytes());
+        d.resize(start as usize, 0);
+        d.extend([0u8; 6]);
+        d.extend((items.len() as u16).to_be_bytes());
+        d.extend([0u8; 2]);
+        for (name, t_in, t_out) in items {
+            let mut item = vec![0u8; 22];
+            item[0..2].copy_from_slice(&20u16.to_be_bytes());
+            item[2..7].copy_from_slice(name.as_bytes());
+            item[14..18].copy_from_slice(&t_in.to_be_bytes());
+            item[18..22].copy_from_slice(&t_out.to_be_bytes());
+            d.extend(item);
+        }
+        d
+    }
+
+    fn title(files: &[&str], size: u64, duration: Option<f64>) -> Title {
+        Title {
+            number: 0,
+            files: files.iter().map(PathBuf::from).collect(),
+            size,
+            label: String::new(),
+            duration,
+            playlist: None,
+            locked: None,
+        }
+    }
+
+    #[test]
+    fn disc_kind_labels() {
+        assert_eq!(DiscKind::Dvd.label(), "DVD");
+        assert_eq!(DiscKind::BluRay.label(), "Blu-ray");
+    }
+
+    #[test]
+    fn stream_describe_with_language_and_channels() {
+        let s = Stream { codec: "ac3".into(), language: Some("eng".into()), channels: Some(6) };
+        assert_eq!(s.describe(1), "1. ENG AC3 5.1");
+    }
+
+    #[test]
+    fn stream_describe_channel_variants() {
+        for (ch, label) in [(Some(1), " mono"), (Some(2), " stereo"), (Some(8), " 7.1"), (Some(3), ""), (None, "")] {
+            let s = Stream { codec: "dts".into(), language: None, channels: ch };
+            assert_eq!(s.describe(2), format!("2. DTS{label}"));
+        }
+    }
+
+    #[test]
+    fn stream_describe_ignores_undefined_or_empty_language() {
+        for lang in ["und", ""] {
+            let s = Stream { codec: "pgssub".into(), language: Some(lang.into()), channels: None };
+            assert_eq!(s.describe(3), "3. PGSSUB");
+        }
+    }
+
+    #[test]
+    fn title_input_single_file() {
+        let t = title(&["/disc/a.m2ts"], 1, None);
+        assert_eq!(t.input(), "/disc/a.m2ts");
+    }
+
+    #[test]
+    fn title_input_concat_for_many_files() {
+        let t = title(&["/d/VTS_01_1.VOB", "/d/VTS_01_2.VOB"], 1, None);
+        assert_eq!(t.input(), "concat:/d/VTS_01_1.VOB|/d/VTS_01_2.VOB");
+    }
+
+    #[test]
+    fn path_for_ffmpeg_keeps_unix_paths() {
+        #[cfg(not(windows))]
+        assert_eq!(path_for_ffmpeg(Path::new("/a/b c/d.vob")), "/a/b c/d.vob");
+        #[cfg(windows)]
+        assert_eq!(path_for_ffmpeg(Path::new(r"C:\a\b.vob")), "C:/a/b.vob");
+    }
+
+    #[test]
+    fn main_title_empty_disc() {
+        let d = Disc { kind: DiscKind::Dvd, name: "x".into(), titles: vec![], encrypted: false };
+        assert_eq!(d.main_title(), None);
+    }
+
+    #[test]
+    fn main_title_prefers_largest_size_over_duration() {
+        let d = Disc {
+            kind: DiscKind::BluRay,
+            name: "x".into(),
+            titles: vec![title(&["a"], 100, Some(36000.0)), title(&["b"], 5000, Some(60.0)), title(&["c"], 200, None)],
+            encrypted: true,
+        };
+        assert_eq!(d.main_title(), Some(1));
+    }
+
+    #[test]
+    fn main_title_breaks_size_ties_by_duration() {
+        let d = Disc {
+            kind: DiscKind::BluRay,
+            name: "x".into(),
+            titles: vec![title(&["a"], 100, Some(10.0)), title(&["b"], 100, Some(20.0)), title(&["c"], 100, None)],
+            encrypted: false,
+        };
+        assert_eq!(d.main_title(), Some(1));
+    }
+
+    #[test]
+    fn human_size_units() {
+        assert_eq!(human_size(0), "0 KB");
+        assert_eq!(human_size(1_500), "2 KB");
+        assert_eq!(human_size(250_000_000), "250 MB");
+        assert_eq!(human_size(4_700_000_000), "4.70 GB");
+    }
+
+    #[test]
+    fn human_time_formats() {
+        assert_eq!(human_time(0.0), "00:00:00");
+        assert_eq!(human_time(59.6), "00:01:00");
+        assert_eq!(human_time(3661.0), "01:01:01");
+        assert_eq!(human_time(-5.0), "00:00:00");
+        assert_eq!(human_time(100.0 * 3600.0), "100:00:00");
+    }
+
+    #[test]
+    fn kind_of_detects_folders() {
+        let t = TempDir::new("kind_of");
+        assert_eq!(kind_of(&t.0), None);
+        fs::create_dir(t.0.join("VIDEO_TS")).unwrap();
+        assert_eq!(kind_of(&t.0), Some(DiscKind::Dvd));
+        let b = TempDir::new("kind_of_bd");
+        fs::create_dir(b.0.join("BDMV")).unwrap();
+        assert_eq!(kind_of(&b.0), Some(DiscKind::BluRay));
+    }
+
+    #[test]
+    fn kind_of_ignores_files_named_like_folders() {
+        let t = TempDir::new("kind_of_file");
+        touch(&t.0.join("VIDEO_TS"), 1);
+        assert_eq!(kind_of(&t.0), None);
+    }
+
+    #[test]
+    fn ffprobe_for_uses_sibling() {
+        let t = TempDir::new("ffprobe_sibling");
+        let name = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
+        touch(&t.0.join(name), 1);
+        let ffmpeg = t.0.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+        assert_eq!(ffprobe_for(&ffmpeg), Some(t.0.join(name)));
+    }
+
+    #[test]
+    fn find_tool_missing_returns_none() {
+        assert_eq!(find_tool("definitely-not-a-real-tool-openrip"), None);
+    }
+
+    #[test]
+    fn parse_mpls_rejects_bad_data() {
+        assert!(parse_mpls(b"").is_none());
+        assert!(parse_mpls(b"NOPE0200").is_none());
+        // Right magic but truncated.
+        assert!(parse_mpls(b"MPLS0200\0\0\0\x14").is_none());
+    }
+
+    #[test]
+    fn parse_mpls_reads_clips_and_duration() {
+        let data = mpls(&[("00001", 0, 45_000 * 60), ("00002", 45_000, 45_000 * 31)]);
+        let (clips, secs) = parse_mpls(&data).expect("parsed");
+        assert_eq!(clips, vec!["00001".to_string(), "00002".to_string()]);
+        assert!((secs - 90.0).abs() < 1e-9, "{secs}");
+    }
+
+    #[test]
+    fn parse_mpls_truncated_items_fail() {
+        let mut data = mpls(&[("00001", 0, 45_000)]);
+        data.truncate(data.len() - 5);
+        assert!(parse_mpls(&data).is_none());
+    }
+
+    #[test]
+    fn parse_mpls_out_before_in_saturates() {
+        let (_, secs) = parse_mpls(&mpls(&[("00001", 1000, 10)])).unwrap();
+        assert_eq!(secs, 0.0);
+    }
+
+    #[test]
+    fn dvd_titles_groups_sorts_and_skips_menu() {
+        let t = TempDir::new("dvd_titles");
+        let v = t.0.join("VIDEO_TS");
+        touch(&v.join("VIDEO_TS.VOB"), 5);
+        touch(&v.join("VTS_01_0.VOB"), 5); // menu
+        touch(&v.join("VTS_01_2.VOB"), 20);
+        touch(&v.join("VTS_01_1.VOB"), 10);
+        touch(&v.join("vts_02_1.vob"), 7); // lowercase still counts
+        touch(&v.join("VTS_01_0.IFO"), 3);
+        touch(&v.join("VTS_XX_1.VOB"), 3);
+        let titles = dvd_titles(&v).unwrap();
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles[0].number, 1);
+        assert_eq!(titles[0].size, 30);
+        let names: Vec<String> = titles[0].files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["VTS_01_1.VOB", "VTS_01_2.VOB"]);
+        assert_eq!(titles[1].number, 2);
+        assert_eq!(titles[1].size, 7);
+        assert!(titles[0].playlist.is_none() && titles[0].locked.is_none() && titles[0].duration.is_none());
+    }
+
+    #[test]
+    fn dvd_titles_errors() {
+        let t = TempDir::new("dvd_empty");
+        let v = t.0.join("VIDEO_TS");
+        fs::create_dir(&v).unwrap();
+        touch(&v.join("VTS_01_0.VOB"), 1);
+        assert_eq!(dvd_titles(&v).unwrap_err(), "This DVD has no video titles.");
+        assert!(dvd_titles(&t.0.join("missing")).unwrap_err().starts_with("Couldn't read the disc"));
+    }
+
+    #[test]
+    fn bluray_titles_from_playlists_sorted_and_deduped() {
+        let t = TempDir::new("bd_playlists");
+        let bdmv = t.0.join("BDMV");
+        touch(&bdmv.join("STREAM/00001.m2ts"), 100);
+        touch(&bdmv.join("STREAM/00002.M2TS"), 300);
+        touch(&bdmv.join("STREAM/00003.m2ts"), 50);
+        let pl = bdmv.join("PLAYLIST");
+        fs::create_dir_all(&pl).unwrap();
+        fs::write(pl.join("00000.mpls"), mpls(&[("00001", 0, 45_000 * 10)])).unwrap();
+        fs::write(pl.join("00001.mpls"), mpls(&[("00001", 0, 45_000 * 10)])).unwrap(); // duplicate
+        fs::write(pl.join("00800.mpls"), mpls(&[("00002", 0, 45_000 * 100), ("00003", 0, 45_000 * 20)])).unwrap();
+        fs::write(pl.join("00900.mpls"), mpls(&[("99999", 0, 45_000)])).unwrap(); // clip missing
+        fs::write(pl.join("junk.mpls"), b"garbage").unwrap();
+        fs::write(pl.join("notes.txt"), b"x").unwrap();
+
+        let titles = bluray_titles(&bdmv).unwrap();
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles[0].number, 1);
+        assert_eq!(titles[0].label, "playlist 00800");
+        assert_eq!(titles[0].playlist, Some(800));
+        assert_eq!(titles[0].size, 350);
+        assert_eq!(titles[0].duration, Some(120.0));
+        assert_eq!(titles[0].files.len(), 2);
+        assert_eq!(titles[1].number, 2);
+        assert_eq!(titles[1].label, "playlist 00000");
+        assert_eq!(titles[1].size, 100);
+    }
+
+    #[test]
+    fn bluray_titles_counts_repeated_clip_once_in_size() {
+        let t = TempDir::new("bd_repeat");
+        let bdmv = t.0.join("BDMV");
+        touch(&bdmv.join("STREAM/00001.m2ts"), 100);
+        fs::create_dir_all(bdmv.join("PLAYLIST")).unwrap();
+        fs::write(bdmv.join("PLAYLIST/00001.mpls"), mpls(&[("00001", 0, 45_000), ("00001", 0, 45_000)])).unwrap();
+        let titles = bluray_titles(&bdmv).unwrap();
+        assert_eq!(titles[0].files.len(), 2);
+        assert_eq!(titles[0].size, 100);
+    }
+
+    #[test]
+    fn bluray_titles_falls_back_to_clips() {
+        let t = TempDir::new("bd_clips");
+        let bdmv = t.0.join("BDMV");
+        touch(&bdmv.join("STREAM/00002.m2ts"), 20);
+        touch(&bdmv.join("STREAM/00001.m2ts"), 10);
+        touch(&bdmv.join("STREAM/readme.txt"), 1);
+        let titles = bluray_titles(&bdmv).unwrap();
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles[0].label, "clip 00001");
+        assert_eq!(titles[0].size, 10);
+        assert_eq!(titles[1].label, "clip 00002");
+        assert!(titles.iter().all(|t| t.playlist.is_none() && t.duration.is_none()));
+    }
+
+    #[test]
+    fn bluray_titles_errors() {
+        let t = TempDir::new("bd_empty");
+        let bdmv = t.0.join("BDMV");
+        fs::create_dir_all(bdmv.join("STREAM")).unwrap();
+        assert_eq!(bluray_titles(&bdmv).unwrap_err(), "This Blu-ray has no video clips.");
+        assert!(bluray_titles(&t.0.join("nowhere")).is_err());
+    }
+
+    #[test]
+    fn open_dvd_root_and_video_ts_folder() {
+        let t = TempDir::new("open_dvd");
+        let root = t.0.join("MY_MOVIE");
+        touch(&root.join("VIDEO_TS/VTS_01_1.VOB"), 10);
+        for path in [root.clone(), root.join("VIDEO_TS")] {
+            let d = open(&path).unwrap();
+            assert_eq!(d.kind, DiscKind::Dvd);
+            assert_eq!(d.name, "MY_MOVIE");
+            assert_eq!(d.titles.len(), 1);
+            assert!(!d.encrypted);
+        }
+    }
+
+    #[test]
+    fn open_bluray_accepts_stream_folder_and_flags_encryption() {
+        let t = TempDir::new("open_bd");
+        let root = t.0.join("BD_DISC");
+        touch(&root.join("BDMV/STREAM/00001.m2ts"), 10);
+        fs::create_dir_all(root.join("BDMV/PLAYLIST")).unwrap();
+        fs::write(root.join("BDMV/PLAYLIST/00001.mpls"), mpls(&[("00001", 0, 45_000)])).unwrap();
+
+        let d = open(&root.join("BDMV/STREAM")).unwrap();
+        assert_eq!(d.kind, DiscKind::BluRay);
+        assert_eq!(d.name, "BD_DISC");
+        assert!(!d.encrypted);
+        assert!(d.titles[0].locked.is_none());
+
+        fs::create_dir(root.join("AACS")).unwrap();
+        let d = open(&root).unwrap();
+        assert!(d.encrypted);
+        assert_eq!(d.titles[0].locked.as_deref(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn open_encrypted_bluray_only_locks_playlist_titles() {
+        let t = TempDir::new("open_bd_clips");
+        let root = t.0.join("BD");
+        touch(&root.join("BDMV/STREAM/00001.m2ts"), 10);
+        fs::create_dir(root.join("AACS")).unwrap();
+        let d = open(&root).unwrap();
+        assert!(d.encrypted);
+        assert!(d.titles[0].locked.is_none());
+    }
+
+    #[test]
+    fn open_without_disc_folders_errors() {
+        let t = TempDir::new("open_none");
+        let err = open(&t.0).unwrap_err();
+        assert!(err.contains("No DVD"), "{err}");
+    }
+
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n[ -n \"$OPENRIP_PROBE\" ] && exit 0\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        // Parallel tests can fork while this file is still open for writing (ETXTBSY);
+        // wait until it can be executed before handing it out.
+        for _ in 0..200 {
+            match std::process::Command::new(&p).env("OPENRIP_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                _ => break,
+            }
+        }
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_parses_ffprobe_output() {
+        let t = TempDir::new("probe");
+        let ffmpeg = script(&t.0, "ffmpeg", "exit 1"); // thumbnail fails -> None
+        script(
+            &t.0,
+            "ffprobe",
+            r#"cat <<'OUT'
+stream|codec_name=mpeg2video|codec_type=video|width=720|height=480
+stream|codec_name=ac3|codec_type=audio|channels=6|tag:language=eng
+stream|codec_name=dts|codec_type=audio|channels=2
+stream|codec_name=dvd_subtitle|codec_type=subtitle|tag:language=fra
+stream|codec_name=mpeg2video|codec_type=video|width=1|height=1
+format|duration=123.5
+OUT"#,
+        );
+        let info = probe(&ffmpeg, &title(&["/x/a.vob"], 1, None));
+        assert_eq!((info.width, info.height), (Some(720), Some(480)));
+        assert_eq!(info.duration, Some(123.5));
+        assert_eq!(info.audio.len(), 2);
+        assert_eq!(info.audio[0].codec, "ac3");
+        assert_eq!(info.audio[0].channels, Some(6));
+        assert_eq!(info.audio[0].language.as_deref(), Some("eng"));
+        assert_eq!(info.subtitles.len(), 1);
+        assert_eq!(info.subtitles[0].codec, "dvd");
+        assert!(info.thumb.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_prefers_playlist_duration() {
+        let t = TempDir::new("probe_pl");
+        let ffmpeg = script(&t.0, "ffmpeg", "exit 1");
+        script(&t.0, "ffprobe", "echo 'format|duration=5.0'");
+        let info = probe(&ffmpeg, &title(&["/x/a.m2ts"], 1, Some(99.0)));
+        assert_eq!(info.duration, Some(99.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_sums_parts_of_joined_files() {
+        let t = TempDir::new("probe_sum");
+        let ffmpeg = script(&t.0, "ffmpeg", "exit 1");
+        // Whole-input probe reports a wrong length; per-file probes report CSV durations.
+        script(&t.0, "ffprobe", r#"case "$*" in *concat:*) echo 'format|duration=1.0';; *) echo 10.5;; esac"#);
+        let info = probe(&ffmpeg, &title(&["/x/1.vob", "/x/2.vob"], 1, None));
+        assert_eq!(info.duration, Some(21.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_without_tools_gives_empty_info() {
+        let t = TempDir::new("probe_none");
+        let info = probe(&t.0.join("no-ffmpeg"), &title(&["/x/a.vob"], 1, None));
+        assert!(info.duration.is_none() && info.thumb.is_none() && info.audio.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_decodes_png_from_ffmpeg() {
+        let t = TempDir::new("thumb");
+        // Write a real 2x1 PNG via the image crate, then have a fake ffmpeg cat it.
+        let png_path = t.0.join("frame.png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255])).save(&png_path).unwrap();
+        let ffmpeg = script(&t.0, "ffmpeg", &format!("cat '{}'", png_path.display()));
+        let (rgba, w, h) = thumbnail(&ffmpeg, "ignored", 1.0).expect("thumb");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba.len(), 8);
+        assert_eq!(&rgba[..4], &[1, 2, 3, 255]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_none_on_garbage() {
+        let t = TempDir::new("thumb_bad");
+        let ffmpeg = script(&t.0, "ffmpeg", "echo not-a-png");
+        assert!(thumbnail(&ffmpeg, "x", 0.0).is_none());
+    }
+}

@@ -235,3 +235,65 @@ impl Drop for Reader {
         unsafe { (self.close)(self.bd) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_lib_returns_none_for_unknown_library() {
+        assert_eq!(find_lib(&["libopenrip-no-such-library.so.99"]), None);
+        assert_eq!(find_lib(&[]), None);
+    }
+
+    #[test]
+    fn library_name_tables_are_not_empty_on_supported_platforms() {
+        if cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows")) {
+            assert!(!BLURAY_LIBS.is_empty());
+            assert!(!AACS_LIBS.is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keydb_paths_point_into_aacs_config_folder() {
+        for p in keydb_paths() {
+            assert!(p.ends_with(".config/aacs/keydb.cfg") || p.ends_with(".config/aacs/KEYDB.cfg"), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn missing_only_reports_known_gaps() {
+        for item in missing() {
+            assert!(item == "libbluray" || item == "libaacs" || item.starts_with("a key file"), "{item}");
+        }
+    }
+
+    #[test]
+    fn missing_agrees_with_library_lookup() {
+        let gaps = missing();
+        assert_eq!(gaps.contains(&"libbluray"), find_lib(BLURAY_LIBS).is_none());
+        assert_eq!(gaps.contains(&"libaacs"), find_lib(AACS_LIBS).is_none());
+    }
+
+    #[test]
+    fn init_is_harmless() {
+        init();
+    }
+
+    #[test]
+    fn reader_open_fails_for_a_folder_that_is_not_a_disc() {
+        let dir = std::env::temp_dir().join(format!("openrip-bd-notdisc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Either libbluray is absent, or it can't open/unlock an empty folder.
+        let err = Reader::open(&dir, 1).err().expect("should fail");
+        assert!(!err.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reader_open_rejects_paths_with_nul() {
+        let err = Reader::open(Path::new("bad\0path"), 1).err().expect("should fail");
+        assert!(!err.is_empty());
+    }
+}

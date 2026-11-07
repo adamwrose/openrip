@@ -424,3 +424,433 @@ pub fn start(
         wake();
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn profile(name: &str) -> Profile {
+        *PROFILES.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("no profile {name}"))
+    }
+
+    fn job(profile: Profile) -> Job {
+        Job {
+            slot: 3,
+            input: "/disc/in.vob".into(),
+            duration: Some(100.0),
+            audio_track: None,
+            subtitles: false,
+            output: PathBuf::from("/out/movie.mp4"),
+            profile,
+            locked: None,
+        }
+    }
+
+    /// merge() names its list file after the process id, so tests that merge take turns.
+    static MERGE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn settings() -> Settings {
+        Settings { resolution: Resolution::Source, quality: Quality::Standard, hardware: false, deinterlace: false }
+    }
+
+    fn has_pair(a: &[String], k: &str, v: &str) -> bool {
+        a.windows(2).any(|w| w[0] == k && w[1] == v)
+    }
+
+    fn unique_dir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("openrip-rip-unit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn profiles_are_unique_and_sane() {
+        let mut names: Vec<_> = PROFILES.iter().map(|p| p.name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), PROFILES.len());
+        for p in PROFILES {
+            assert!(!p.ext.is_empty() && !p.note.is_empty());
+            if p.group == Group::Audio {
+                assert!(!p.keeps_subs, "{}", p.name);
+            }
+            if p.keeps_subs {
+                assert_eq!(p.ext, "mkv", "only mkv carries subtitles: {}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn resolution_and_quality_labels() {
+        assert_eq!(Resolution::ALL.len(), 4);
+        assert_eq!(Resolution::Source.label(), "Same as source");
+        assert_eq!(Resolution::P1080.label(), "1080p");
+        assert_eq!(Resolution::P720.label(), "720p");
+        assert_eq!(Resolution::P480.label(), "480p");
+        assert_eq!(Resolution::Source.height(), None);
+        assert_eq!(Resolution::P480.height(), Some(480));
+        assert_eq!(Quality::ALL.len(), 3);
+        assert_eq!(Quality::High.label(), "High");
+        assert_eq!(Quality::Standard.label(), "Standard");
+        assert_eq!(Quality::Small.label(), "Small file");
+    }
+
+    #[test]
+    fn args_mp4_software_defaults() {
+        let a = args_for(&job(profile("MP4")), &settings());
+        assert!(has_pair(&a, "-i", "/disc/in.vob"));
+        assert!(has_pair(&a, "-map", "0:v:0"));
+        assert!(has_pair(&a, "-map", "0:a:0?"));
+        assert!(has_pair(&a, "-c:v", "libx264"));
+        assert!(has_pair(&a, "-crf", "21"));
+        assert!(has_pair(&a, "-c:a", "aac"));
+        assert!(has_pair(&a, "-movflags", "+faststart"));
+        assert!(!a.contains(&"-vf".to_string()));
+        assert!(!a.contains(&"0:s?".to_string()));
+        assert_eq!(a.last().unwrap(), "/out/movie.mp4");
+    }
+
+    #[test]
+    fn args_quality_maps_to_crf() {
+        for (q, crf) in [(Quality::High, "18"), (Quality::Standard, "21"), (Quality::Small, "25")] {
+            let s = Settings { quality: q, ..settings() };
+            assert!(has_pair(&args_for(&job(profile("MP4")), &s), "-crf", crf));
+            assert!(has_pair(&args_for(&job(profile("MP4 HEVC")), &s), "-crf", crf));
+        }
+    }
+
+    #[test]
+    fn args_quality_maps_to_hardware_q() {
+        for (q, v) in [(Quality::High, "70"), (Quality::Standard, "58"), (Quality::Small, "45")] {
+            let s = Settings { quality: q, hardware: true, ..settings() };
+            let a = args_for(&job(profile("MP4")), &s);
+            assert!(has_pair(&a, "-c:v", "h264_videotoolbox"));
+            assert!(has_pair(&a, "-q:v", v));
+        }
+    }
+
+    #[test]
+    fn args_hevc_software_and_hardware() {
+        let a = args_for(&job(profile("MP4 HEVC")), &settings());
+        assert!(has_pair(&a, "-c:v", "libx265"));
+        assert!(has_pair(&a, "-tag:v", "hvc1"));
+        let a = args_for(&job(profile("MP4 HEVC")), &Settings { hardware: true, ..settings() });
+        assert!(has_pair(&a, "-c:v", "hevc_videotoolbox"));
+    }
+
+    #[test]
+    fn args_audio_track_selection() {
+        let mut j = job(profile("MP4"));
+        j.audio_track = Some(2);
+        assert!(has_pair(&args_for(&j, &settings()), "-map", "0:a:2?"));
+    }
+
+    #[test]
+    fn args_subtitles_only_when_container_keeps_them() {
+        let mut j = job(profile("MKV"));
+        j.subtitles = true;
+        let a = args_for(&j, &settings());
+        assert!(has_pair(&a, "-map", "0:s?"));
+        assert!(has_pair(&a, "-c:s", "copy"));
+
+        j.subtitles = false;
+        assert!(!args_for(&j, &settings()).contains(&"0:s?".to_string()));
+
+        let mut j = job(profile("MP4"));
+        j.subtitles = true;
+        assert!(!args_for(&j, &settings()).contains(&"0:s?".to_string()));
+
+        let mut j = job(profile("FLAC"));
+        j.subtitles = true;
+        assert!(!args_for(&j, &settings()).contains(&"0:s?".to_string()));
+    }
+
+    #[test]
+    fn args_lossless_copies_all_audio_without_filters() {
+        let s = Settings { resolution: Resolution::P480, deinterlace: true, ..settings() };
+        let a = args_for(&job(profile("MKV Lossless")), &s);
+        assert!(has_pair(&a, "-map", "0:a?"));
+        assert!(has_pair(&a, "-c:v", "copy"));
+        assert!(has_pair(&a, "-c:a", "copy"));
+        assert!(!a.contains(&"-vf".to_string()));
+        assert!(!a.contains(&"-movflags".to_string()));
+    }
+
+    #[test]
+    fn args_mpg_copy_maps_first_audio_only() {
+        let a = args_for(&job(profile("MPG")), &settings());
+        assert!(has_pair(&a, "-map", "0:a:0?"));
+        assert!(!a.contains(&"0:a?".to_string()));
+    }
+
+    #[test]
+    fn args_audio_only_profiles() {
+        for (name, codec) in [("MP3", "libmp3lame"), ("M4A", "aac"), ("FLAC", "flac"), ("WAV", "pcm_s16le")] {
+            let a = args_for(&job(profile(name)), &Settings { deinterlace: true, resolution: Resolution::P720, ..settings() });
+            assert!(!has_pair(&a, "-map", "0:v:0"), "{name}");
+            assert!(a.contains(&"-vn".to_string()), "{name}");
+            assert!(has_pair(&a, "-c:a", codec), "{name}");
+            assert!(!a.contains(&"-vf".to_string()), "{name}");
+        }
+        assert!(has_pair(&args_for(&job(profile("M4A")), &settings()), "-movflags", "+faststart"));
+        assert!(!args_for(&job(profile("MP3")), &settings()).contains(&"-movflags".to_string()));
+    }
+
+    #[test]
+    fn args_avi_uses_mpeg4_and_mp3() {
+        let a = args_for(&job(profile("AVI")), &settings());
+        assert!(has_pair(&a, "-c:v", "mpeg4"));
+        assert!(has_pair(&a, "-c:a", "libmp3lame"));
+    }
+
+    #[test]
+    fn args_filters_deinterlace_and_scale() {
+        let s = Settings { deinterlace: true, resolution: Resolution::P720, ..settings() };
+        let a = args_for(&job(profile("MP4")), &s);
+        let i = a.iter().position(|x| x == "-vf").expect("vf");
+        assert_eq!(a[i + 1], "bwdif=mode=send_frame:deint=interlaced,scale=-2:'min(720,ih)'");
+    }
+
+    #[test]
+    fn args_scale_uses_smaller_of_user_and_device_cap() {
+        let s = Settings { resolution: Resolution::P1080, ..settings() };
+        let a = args_for(&job(profile("Android")), &s); // cap 720
+        assert!(a.iter().any(|x| x == "scale=-2:'min(720,ih)'"));
+        let s = Settings { resolution: Resolution::P480, ..settings() };
+        let a = args_for(&job(profile("iPhone")), &s); // cap 1080
+        assert!(a.iter().any(|x| x == "scale=-2:'min(480,ih)'"));
+        // Device cap applies on its own when the user keeps the source size.
+        let a = args_for(&job(profile("iPhone")), &settings());
+        assert!(a.iter().any(|x| x == "scale=-2:'min(1080,ih)'"));
+    }
+
+    #[test]
+    fn args_locked_reads_from_stdin() {
+        let mut j = job(profile("MP4"));
+        j.locked = Some((PathBuf::from("/bd"), 800));
+        let a = args_for(&j, &settings());
+        assert!(has_pair(&a, "-f", "mpegts"));
+        assert!(has_pair(&a, "-i", "pipe:0"));
+        assert!(!a.contains(&"/disc/in.vob".to_string()));
+    }
+
+    #[test]
+    fn args_report_progress_on_stdout() {
+        let a = args_for(&job(profile("MP4")), &settings());
+        assert!(has_pair(&a, "-progress", "pipe:1"));
+        assert!(a.contains(&"-nostats".to_string()));
+    }
+
+    #[test]
+    fn free_path_sanitises_and_avoids_collisions() {
+        let dir = unique_dir("free_path");
+        assert_eq!(free_path(&dir, "My: Movie/?", "mp4"), dir.join("My_ Movie__.mp4"));
+        assert_eq!(free_path(&dir, "Keep (1)-a_b.c", "mkv"), dir.join("Keep (1)-a_b.c.mkv"));
+        std::fs::write(dir.join("Film.mp4"), b"x").unwrap();
+        assert_eq!(free_path(&dir, "Film", "mp4"), dir.join("Film (2).mp4"));
+        std::fs::write(dir.join("Film (2).mp4"), b"x").unwrap();
+        assert_eq!(free_path(&dir, "Film", "mp4"), dir.join("Film (3).mp4"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn free_path_keeps_unicode_letters() {
+        let dir = unique_dir("free_path_unicode");
+        assert_eq!(free_path(&dir, "Amélie", "mp4"), dir.join("Amélie.mp4"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn control_stop_sets_cancel() {
+        let c = Control::default();
+        assert!(!c.cancel.load(Ordering::SeqCst));
+        let c2 = c.clone();
+        c2.stop();
+        assert!(c.cancel.load(Ordering::SeqCst), "clones share the flag");
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("ffmpeg");
+        std::fs::write(&p, format!("#!/bin/sh\n[ -n \"$OPENRIP_PROBE\" ] && exit 0\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Parallel tests can fork while this file is still open for writing (ETXTBSY);
+        // wait until it can be executed before handing it out.
+        for _ in 0..200 {
+            match std::process::Command::new(&p).env("OPENRIP_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                _ => break,
+            }
+        }
+        p
+    }
+
+    #[cfg(unix)]
+    fn run(ffmpeg: PathBuf, jobs: Vec<Job>, merge_to: Option<PathBuf>, control: Control) -> Vec<Msg> {
+        let (tx, rx) = channel();
+        start(ffmpeg, jobs, settings(), merge_to, control, tx, || {});
+        let mut out = Vec::new();
+        for m in rx.iter() {
+            let done = matches!(m, Msg::AllDone);
+            out.push(m);
+            if done {
+                break;
+            }
+        }
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_reports_progress_and_success() {
+        let dir = unique_dir("run_ok");
+        // The output path is the last argument; create it, and emit progress lines.
+        let ffmpeg = fake_ffmpeg(
+            &dir,
+            r#"for a; do out="$a"; done
+echo data > "$out"
+echo out_time_us=50000000
+echo speed=2.5x
+echo out_time_us=500000000
+echo progress=end"#,
+        );
+        let mut j = job(profile("MP4"));
+        j.output = dir.join("out.mp4");
+        let msgs = run(ffmpeg, vec![j], None, Control::default());
+        assert!(matches!(msgs[0], Msg::Started(3)));
+        let fractions: Vec<f32> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                Msg::Progress { slot: 3, fraction, .. } => Some(*fraction),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fractions, vec![0.5, 1.0], "second value is clamped");
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Progress { speed, .. } if *speed == 2.5)));
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Finished { slot: 3, result: Ok(p) } if *p == dir.join("out.mp4"))));
+        assert!(matches!(msgs.last().unwrap(), Msg::AllDone));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_reports_failure_with_hint_and_removes_output() {
+        let dir = unique_dir("run_fail");
+        let ffmpeg = fake_ffmpeg(
+            &dir,
+            r#"for a; do out="$a"; done
+echo partial > "$out"
+echo "Invalid data found when processing input" >&2
+exit 1"#,
+        );
+        let mut j = job(profile("MP4"));
+        j.output = dir.join("out.mp4");
+        let msgs = run(ffmpeg, vec![j], None, Control::default());
+        let err = msgs
+            .iter()
+            .find_map(|m| match m {
+                Msg::Finished { result: Err(e), .. } => Some(e.clone()),
+                _ => None,
+            })
+            .expect("failure reported");
+        assert!(err.starts_with("FFmpeg failed (the disc may be copy-protected):"), "{err}");
+        assert!(err.contains("Invalid data"));
+        assert!(!dir.join("out.mp4").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_failure_without_hint() {
+        let dir = unique_dir("run_fail_plain");
+        let ffmpeg = fake_ffmpeg(&dir, "echo 'something else' >&2\nexit 1");
+        let mut j = job(profile("MP4"));
+        j.output = dir.join("out.mp4");
+        let msgs = run(ffmpeg, vec![j], None, Control::default());
+        let err = msgs.iter().find_map(|m| if let Msg::Finished { result: Err(e), .. } = m { Some(e.clone()) } else { None }).unwrap();
+        assert_eq!(err, "FFmpeg failed: something else");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_missing_ffmpeg_is_an_error() {
+        let dir = unique_dir("run_missing");
+        let mut j = job(profile("MP4"));
+        j.output = dir.join("out.mp4");
+        let msgs = run(dir.join("no-such-ffmpeg"), vec![j], None, Control::default());
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Finished { result: Err(e), .. } if e.starts_with("Couldn't start FFmpeg"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_cancelled_before_begin_runs_nothing() {
+        let dir = unique_dir("run_cancel");
+        let ffmpeg = fake_ffmpeg(&dir, "exit 0");
+        let control = Control::default();
+        control.cancel.store(true, Ordering::SeqCst);
+        let msgs = run(ffmpeg, vec![job(profile("MP4"))], Some(dir.join("merged.mkv")), control);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0], Msg::AllDone));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_merges_multiple_results() {
+        let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_dir("run_merge");
+        // Both rips and the merge go through the same fake: it touches its last argument.
+        let ffmpeg = fake_ffmpeg(&dir, "for a; do out=\"$a\"; done\necho x > \"$out\"");
+        let jobs: Vec<Job> = (0..2)
+            .map(|i| {
+                let mut j = job(profile("MKV"));
+                j.slot = i;
+                j.output = dir.join(format!("part{i}.mkv"));
+                j
+            })
+            .collect();
+        let merged = dir.join("merged.mkv");
+        let msgs = run(ffmpeg, jobs, Some(merged.clone()), Control::default());
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Merged(Ok(p)) if *p == merged)));
+        assert!(merged.exists());
+        assert!(!dir.join("part0.mkv").exists() && !dir.join("part1.mkv").exists(), "parts removed after merge");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_failure_keeps_parts_and_reports_stderr() {
+        let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_dir("merge_fail");
+        let ffmpeg = fake_ffmpeg(&dir, "echo 'concat broke' >&2\nexit 1");
+        let part = dir.join("p.mkv");
+        std::fs::write(&part, b"x").unwrap();
+        let err = merge(&ffmpeg, &[part.clone()], &dir.join("o.mkv")).unwrap_err();
+        assert_eq!(err, "concat broke");
+        assert!(part.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_escapes_quotes_in_list_file() {
+        let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = unique_dir("merge_quote");
+        // The fake copies the concat list (the argument after -i) somewhere we can read.
+        let ffmpeg = fake_ffmpeg(
+            &dir,
+            &format!("while [ $# -gt 0 ]; do [ \"$1\" = -i ] && cp \"$2\" '{}/list.txt'; last=\"$1\"; shift; done\necho x > \"$last\"", dir.display()),
+        );
+        let part = dir.join("it's.mkv");
+        std::fs::write(&part, b"x").unwrap();
+        merge(&ffmpeg, &[part.clone()], &dir.join("o.mkv")).unwrap();
+        let list = std::fs::read_to_string(dir.join("list.txt")).unwrap();
+        assert_eq!(list, format!("file '{}/it'\\''s.mkv'\n", dir.display()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

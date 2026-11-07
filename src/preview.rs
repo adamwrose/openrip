@@ -214,3 +214,148 @@ impl Drop for Session {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn unique_dir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("openrip-preview-unit-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn source() -> Source {
+        Source { input: "/disc/in.vob".into(), locked: None, duration: Some(60.0), audio_track: 1, has_audio: false }
+    }
+
+    fn muted() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("ffmpeg");
+        fs::write(&p, format!("#!/bin/sh\n[ -n \"$OPENRIP_PROBE\" ] && exit 0\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        // Parallel tests can fork while this file is still open for writing (ETXTBSY);
+        // wait until it can be executed before handing it out.
+        for _ in 0..200 {
+            match std::process::Command::new(&p).env("OPENRIP_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                _ => break,
+            }
+        }
+        p
+    }
+
+    fn wait_for(mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[test]
+    fn frame_geometry_is_widescreen() {
+        assert_eq!((WIDTH, HEIGHT), (854, 480));
+        assert_eq!(WIDTH * HEIGHT * 4, 1_639_680);
+        assert!(FPS > 0.0);
+    }
+
+    #[test]
+    fn missing_ffmpeg_is_reported() {
+        let dir = unique_dir("missing");
+        let err = Session::start(&dir.join("nope"), &source(), 0.0, false, muted(), || {}).err().expect("error");
+        assert!(err.starts_with("Couldn't start FFmpeg"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn protected_source_without_libbluray_or_disc_fails() {
+        let dir = unique_dir("locked");
+        let mut src = source();
+        src.locked = Some((dir.clone(), 1));
+        let result = Session::start(&dir.join("ffmpeg"), &src, 5.0, false, muted(), || {});
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plays_frames_and_tracks_position() {
+        let dir = unique_dir("play");
+        // Two RGBA frames of zeros, then exit.
+        let ffmpeg = fake_ffmpeg(&dir, &format!("head -c {} /dev/zero", WIDTH * HEIGHT * 4 * 2));
+        let woke = Arc::new(AtomicU64::new(0));
+        let w = woke.clone();
+        let mut s = Session::start(&ffmpeg, &source(), 10.0, false, muted(), move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        assert_eq!(s.start, 10.0);
+        assert!(!s.with_audio);
+        assert!(wait_for(|| s.frame.lock().unwrap().is_some()), "a frame arrived");
+        assert!(wait_for(|| s.position() >= 10.0 + 2.0 / FPS - 1e-9), "both frames shown");
+        assert!(wait_for(|| s.ended()), "ended after the frames");
+        assert!(!s.failed());
+        assert_eq!(s.frame.lock().unwrap().as_ref().unwrap().len(), WIDTH * HEIGHT * 4);
+        assert!((s.position() - (10.0 + 2.0 / FPS)).abs() < 1e-9, "{}", s.position());
+        assert!(woke.load(Ordering::SeqCst) >= 2);
+        drop(s);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn negative_start_is_clamped_and_seek_passed_to_ffmpeg() {
+        let dir = unique_dir("args");
+        let log = dir.join("args.txt");
+        let ffmpeg = fake_ffmpeg(&dir, &format!("echo \"$@\" > '{}'", log.display()));
+        let s = Session::start(&ffmpeg, &source(), -4.0, false, muted(), || {}).unwrap();
+        assert_eq!(s.start, 0.0);
+        assert!(wait_for(|| log.exists() && fs::metadata(&log).map(|m| m.len() > 0).unwrap_or(false)));
+        let args = fs::read_to_string(&log).unwrap();
+        assert!(args.contains("-ss 0.00 -i /disc/in.vob"), "{args}");
+        assert!(args.contains("-f rawvideo -pix_fmt rgba pipe:1"), "{args}");
+        assert!(args.contains(&format!("scale={WIDTH}:{HEIGHT}")), "{args}");
+        assert!(!args.contains("f32le"), "no audio output requested: {args}");
+        drop(s);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_when_ffmpeg_exits_without_frames() {
+        let dir = unique_dir("failed");
+        let ffmpeg = fake_ffmpeg(&dir, "exit 1");
+        let mut s = Session::start(&ffmpeg, &source(), 0.0, false, muted(), || {}).unwrap();
+        assert!(wait_for(|| s.failed()));
+        assert!(!s.ended());
+        assert_eq!(s.position(), 0.0);
+        drop(s);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_session_stops_ffmpeg() {
+        let dir = unique_dir("drop");
+        let pidfile = dir.join("pid");
+        let ffmpeg = fake_ffmpeg(&dir, &format!("echo $$ > '{}'\nexec sleep 30", pidfile.display()));
+        let s = Session::start(&ffmpeg, &source(), 0.0, false, muted(), || {}).unwrap();
+        assert!(wait_for(|| fs::read_to_string(&pidfile).map(|s| !s.trim().is_empty()).unwrap_or(false)));
+        let pid = fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        drop(s);
+        // Once dropped, the process has been killed and reaped.
+        let alive = std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+        assert!(!alive, "ffmpeg should be gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
