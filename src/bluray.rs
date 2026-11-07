@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[cfg(target_os = "macos")]
-const BLURAY_LIBS: &[&str] = &["libbluray.dylib", "libbluray.2.dylib"];
+const BLURAY_LIBS: &[&str] = &["libbluray.dylib", "libbluray.4.dylib", "libbluray.2.dylib"];
 #[cfg(target_os = "linux")]
-const BLURAY_LIBS: &[&str] = &["libbluray.so.2", "libbluray.so"];
+const BLURAY_LIBS: &[&str] = &["libbluray.so.4", "libbluray.so.2", "libbluray.so"];
 #[cfg(target_os = "windows")]
-const BLURAY_LIBS: &[&str] = &["libbluray-2.dll", "libbluray.dll"];
+const BLURAY_LIBS: &[&str] = &["libbluray-4.dll", "libbluray-2.dll", "libbluray.dll"];
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const BLURAY_LIBS: &[&str] = &[];
 
@@ -244,6 +244,16 @@ mod tests {
     fn find_lib_returns_none_for_unknown_library() {
         assert_eq!(find_lib(&["libopenrip-no-such-library.so.99"]), None);
         assert_eq!(find_lib(&[]), None);
+    }
+
+    #[test]
+    fn libbluray_names_include_current_and_older_versions() {
+        // libbluray 1.4 is soname 4 (MSYS2's libbluray-4.dll, Arch's libbluray.so.4);
+        // older releases are 2. Both, and the unversioned name, must be tried.
+        let has = |needle: &str| BLURAY_LIBS.iter().any(|n| n.contains(needle));
+        if !BLURAY_LIBS.is_empty() {
+            assert!(has("4") && has("2"), "{BLURAY_LIBS:?}");
+        }
     }
 
     #[test]
