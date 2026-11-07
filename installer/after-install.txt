@@ -1,0 +1,11 @@
+OpenRip is installed, with FFmpeg and the Blu-ray libraries (libbluray and libaacs) included.
+
+Copy-protected Blu-rays also need a key file, which is not included and which you must get
+yourself from online. Save it as:
+
+    %APPDATA%\aacs\KEYDB.cfg
+
+(The installer created that folder for you.) Discs without copy protection, and DVDs, work
+without it.
+
+Only rip discs you own, and check the laws in your country about copy protection.

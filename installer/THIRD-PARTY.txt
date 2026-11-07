@@ -1,0 +1,19 @@
+Third-party software included in the OpenRip installer
+=======================================================
+
+FFmpeg (ffmpeg.exe, ffprobe.exe)
+  Build: BtbN FFmpeg-Builds, "win64-gpl" variant.
+  License: GNU GPL v3 (this build includes GPL components such as x264 and x265).
+  Source code and build scripts: https://github.com/BtbN/FFmpeg-Builds
+  FFmpeg source: https://ffmpeg.org/download.html
+  OpenRip runs ffmpeg.exe and ffprobe.exe as separate programs.
+
+libbluray (libbluray-*.dll) and libaacs (libaacs-*.dll)
+  License: GNU LGPL v2.1
+  Source: https://code.videolan.org/videolan/libbluray
+          https://code.videolan.org/videolan/libaacs
+  Built by the MSYS2 project: https://www.msys2.org/
+  The DLLs they depend on (for example libgcrypt and libxml2) come from MSYS2 as well;
+  their license texts are in this "licenses" folder.
+
+OpenRip itself is available under the MIT or Apache-2.0 license.

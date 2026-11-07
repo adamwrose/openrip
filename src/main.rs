@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! OpenRip: an open-source DVD and Blu-ray ripper with a friendly interface.
 //! The ripping itself is done by FFmpeg.
 

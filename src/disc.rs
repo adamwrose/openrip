@@ -133,9 +133,13 @@ pub struct MountedDisc {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    // A tool shipped next to the app (as the Windows installer does) wins over the PATH.
+    let mut dirs: Vec<PathBuf> = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .into_iter()
+        .collect();
+    dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
 
     #[cfg(target_os = "macos")]
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
@@ -862,6 +866,17 @@ mod tests {
         touch(&t.0.join(name), 1);
         let ffmpeg = t.0.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
         assert_eq!(ffprobe_for(&ffmpeg), Some(t.0.join(name)));
+    }
+
+    #[test]
+    fn find_tool_looks_next_to_the_app_first() {
+        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let name = format!("openrip-bundled-tool-{}", std::process::id());
+        let file = exe_dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.clone() });
+        fs::write(&file, b"x").unwrap();
+        let found = find_tool(&name);
+        let _ = fs::remove_file(&file);
+        assert_eq!(found, Some(file));
     }
 
     #[test]

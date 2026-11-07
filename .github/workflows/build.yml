@@ -1,0 +1,170 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package (Linux and macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/disc-ripper dist/
+          cp README.md dist/
+          tar -czf openrip-${{ matrix.name }}.tar.gz -C dist .
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/disc-ripper.exe dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath openrip-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrip-${{ matrix.name }}
+          path: |
+            openrip-${{ matrix.name }}.tar.gz
+            openrip-${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  windows-installer:
+    name: Windows installer
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: openrip-windows-x86_64
+          path: app
+      - name: Unpack the app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Expand-Archive app/openrip-windows-x86_64.zip -DestinationPath dist
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          $root = Get-ChildItem ffmpeg -Directory | Select-Object -First 1
+          Copy-Item "$($root.FullName)/bin/ffmpeg.exe" dist/
+          Copy-Item "$($root.FullName)/bin/ffprobe.exe" dist/
+          New-Item -ItemType Directory dist/licenses | Out-Null
+          Copy-Item "$($root.FullName)/LICENSE.txt" dist/licenses/FFmpeg-LICENSE.txt
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-libbluray
+            mingw-w64-x86_64-libaacs
+      - name: Collect libbluray, libaacs and the DLLs they need
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p dist/licenses
+          for dll in /mingw64/bin/libbluray-*.dll /mingw64/bin/libaacs-*.dll; do
+            cp "$dll" dist/
+            # Every MSYS2 DLL this one needs (Windows' own DLLs live elsewhere and are skipped).
+            ldd "$dll" | awk '/\/mingw64\// {print $3}' | sort -u | while read -r dep; do
+              cp -n "$dep" dist/
+            done
+          done
+          for pkg in libbluray libaacs libgcrypt libgpg-error libxml2; do
+            if [ -d "/mingw64/share/licenses/$pkg" ]; then
+              cp -r "/mingw64/share/licenses/$pkg" "dist/licenses/$pkg"
+            fi
+          done
+          ls dist
+      - name: Check the folder has everything
+        shell: pwsh
+        run: |
+          foreach ($f in "disc-ripper.exe", "ffmpeg.exe", "ffprobe.exe") {
+            if (-not (Test-Path "dist/$f")) { throw "missing $f" }
+          }
+          if (-not (Get-ChildItem dist -Filter "libbluray*.dll")) { throw "missing libbluray" }
+          if (-not (Get-ChildItem dist -Filter "libaacs*.dll")) { throw "missing libaacs" }
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DSourceDir=$PWD\dist" installer\openrip.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrip-windows-installer
+          path: installer/output/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, windows-installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
