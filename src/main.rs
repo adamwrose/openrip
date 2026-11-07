@@ -1574,7 +1574,7 @@ mod unlock_tests {
             profile: PROFILES[0],
             locked: t.locked.clone().zip(t.playlist),
         };
-        let settings = rip::Settings { resolution: Resolution::P720, quality: Quality::Small, hardware: true, deinterlace: false };
+        let settings = rip::Settings { resolution: Resolution::P720, quality: Quality::Small, hardware: cfg!(target_os = "macos"), deinterlace: false };
         rip::start(ffmpeg.clone(), vec![job], settings, None, rip::Control::default(), tx, || {});
         let mut result = None;
         for msg in rx.iter() {
