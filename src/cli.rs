@@ -821,8 +821,8 @@ mod tests {
         fs::write(disc.join("VIDEO_TS/VTS_02_1.VOB"), vec![0u8; 50]).unwrap();
         // ffprobe: one video, one audio, a 100 s length. ffmpeg: "encodes" by writing the output file.
         script(&dir, "ffprobe", "printf 'stream|codec_type=video|width=720|height=480\\nstream|codec_type=audio|codec_name=ac3|channels=2\\nformat|duration=100.0\\n'");
-        // Thumbnails also call ffmpeg, with "pipe:1" as the last argument: don't make a file of that.
-        let ffmpeg = script(&dir, "ffmpeg", "for a; do out=\"$a\"; done\ncase \"$out\" in pipe:*) exit 0;; esac\necho data > \"$out\"\necho out_time_us=50000000\necho speed=2x\necho progress=end");
+        // Thumbnails and hardware-encoder checks also call ffmpeg, ending in "pipe:1" or "-": don't make files of those.
+        let ffmpeg = script(&dir, "ffmpeg", "for a; do out=\"$a\"; done\ncase \"$out\" in pipe:*|-) exit 0;; esac\necho data > \"$out\"\necho out_time_us=50000000\necho speed=2x\necho progress=end");
         (dir, disc, ffmpeg)
     }
 
@@ -837,6 +837,7 @@ mod tests {
             "--all".into(),
             "--profile".into(),
             "mkv".into(),
+            "--no-hardware".into(),
             "--out".into(),
             out.to_string_lossy().into_owned(),
             "--ffmpeg".into(),
