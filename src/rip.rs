@@ -169,7 +169,7 @@ impl Control {
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
             #[cfg(windows)]
-            let _ = Command::new("taskkill")
+            let _ = crate::disc::hidden_command("taskkill")
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .status();
             #[cfg(unix)]
@@ -332,7 +332,7 @@ fn hw_encoder_args(hw: Hw, hevc: bool, q: &Quality) -> Vec<String> {
 /// Whether FFmpeg can really encode a frame with `hw` (an encoder being listed isn't
 /// enough: the graphics card and driver must support it).
 fn hw_works(ffmpeg: &Path, hw: Hw) -> bool {
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::disc::hidden_command(ffmpeg);
     cmd.args(["-v", "error", "-nostdin"]).args(hw_input_args(hw));
     cmd.args(["-f", "lavfi", "-i", "color=black:s=256x256:d=0.2"]);
     if let Some(filter) = hw_upload_filter(hw) {
@@ -460,7 +460,7 @@ fn run_one(
         Some((root, playlist)) => Some(crate::bluray::Reader::open(root, *playlist)?),
         None => None,
     };
-    let mut child = Command::new(ffmpeg)
+    let mut child = crate::disc::hidden_command(ffmpeg)
         .args(build_args(job, settings, hw))
         .stdin(if reader.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -555,7 +555,7 @@ fn merge(ffmpeg: &Path, parts: &[PathBuf], out: &Path) -> Result<PathBuf, String
         .map(|p| format!("file '{}'\n", crate::disc::path_for_ffmpeg(p).replace('\'', "'\\''")))
         .collect();
     std::fs::write(&list, body).map_err(|e| e.to_string())?;
-    let out_status = Command::new(ffmpeg)
+    let out_status = crate::disc::hidden_command(ffmpeg)
         .args(["-hide_banner", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list)
         .args(["-map", "0", "-c", "copy"])

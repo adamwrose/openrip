@@ -6,7 +6,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -86,7 +86,7 @@ impl Session {
             ]);
         }
 
-        let mut child = Command::new(ffmpeg)
+        let mut child = crate::disc::hidden_command(ffmpeg)
             .args(&args)
             .stdin(if reader.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())

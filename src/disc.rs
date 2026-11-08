@@ -8,6 +8,18 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// A `Command` that doesn't flash a console window when run from the Windows GUI app.
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    c
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DiscKind {
     Dvd,
@@ -305,7 +317,7 @@ fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
            if ($volume) {{ $volume.DriveLetter }} \
          }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}"
     );
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| format!("Couldn't mount the image with Windows PowerShell: {e}"))?;
@@ -581,7 +593,7 @@ pub fn probe(ffmpeg: &Path, title: &Title) -> TitleInfo {
     };
     let input = sample.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| title.input());
     if let Some(ffprobe) = ffprobe_for(ffmpeg) {
-        let out = Command::new(&ffprobe)
+        let out = hidden_command(&ffprobe)
             .args([
                 "-v",
                 "error",
@@ -636,7 +648,7 @@ pub fn probe(ffmpeg: &Path, title: &Title) -> TitleInfo {
                 .files
                 .iter()
                 .map(|f| {
-                    let out = Command::new(&ffprobe)
+                    let out = hidden_command(&ffprobe)
                         .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
                         .arg(f)
                         .stdin(Stdio::null())
@@ -662,7 +674,7 @@ pub fn probe(ffmpeg: &Path, title: &Title) -> TitleInfo {
 }
 
 fn thumbnail(ffmpeg: &Path, input: &str, at: f64) -> Option<(Vec<u8>, usize, usize)> {
-    let out = Command::new(ffmpeg)
+    let out = hidden_command(ffmpeg)
         .args(["-v", "error", "-nostdin", "-ss", &format!("{at:.1}"), "-i", input])
         .args(["-frames:v", "1", "-vf", "scale=240:-2", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
         .stdin(Stdio::null())
