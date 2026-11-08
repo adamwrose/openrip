@@ -79,7 +79,7 @@ ln -s keydb.cfg ~/.config/aacs/KEYDB.cfg
 - **Arch:** `sudo pacman -S libbluray libaacs`
 - **Debian/Ubuntu:** `sudo apt install libbluray2 libaacs0`
 - **macOS (Homebrew):** `brew install libbluray libaacs`
-- **Windows:** put `libbluray-2.dll` and `libaacs-0.dll` somewhere on your `PATH`
+- **Windows:** put `libbluray-2.dll` and `libaacs.dll` somewhere on your `PATH`
 
 ## Legal
 

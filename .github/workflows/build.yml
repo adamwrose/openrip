@@ -121,6 +121,8 @@ jobs:
           mkdir -p dist/licenses
           for dll in /mingw64/bin/libbluray-*.dll /mingw64/bin/libaacs-*.dll; do
             cp "$dll" dist/
+            # libbluray looks for plain "libaacs.dll", but MSYS2 names it libaacs-0.dll.
+            case "$dll" in */libaacs-*.dll) mv "dist/$(basename "$dll")" dist/libaacs.dll ;; esac
             # Every MSYS2 DLL this one needs (Windows' own DLLs live elsewhere and are skipped).
             ldd "$dll" | awk '/\/mingw64\// {print $3}' | sort -u | while read -r dep; do
               cp -n "$dep" dist/

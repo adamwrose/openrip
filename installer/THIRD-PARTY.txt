@@ -8,7 +8,7 @@ FFmpeg (ffmpeg.exe, ffprobe.exe)
   FFmpeg source: https://ffmpeg.org/download.html
   OpenRip runs ffmpeg.exe and ffprobe.exe as separate programs.
 
-libbluray (libbluray-*.dll) and libaacs (libaacs-*.dll)
+libbluray (libbluray-*.dll) and libaacs (libaacs.dll)
   License: GNU LGPL v2.1
   Source: https://code.videolan.org/videolan/libbluray
           https://code.videolan.org/videolan/libaacs
