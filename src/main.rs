@@ -42,40 +42,74 @@ fn main() -> eframe::Result {
     if let Some(code) = cli::run(&args[1..]) {
         std::process::exit(code);
     }
+    // The release build has no console on Windows, so show startup failures in a dialog.
+    std::panic::set_hook(Box::new(|info| show_error(&format!("OpenRip crashed:\n\n{info}"))));
     bluray::init();
     let screenshot = args
         .iter()
         .position(|a| a == "--screenshot")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(format!("{APP_NAME} — DVD & Blu-ray Ripper"))
-            .with_inner_size([1120.0, 720.0])
-            .with_min_inner_size([860.0, 560.0]),
-        ..Default::default()
+    // Windows VMs and basic display drivers only offer OpenGL 1.1, which glow can't use, so
+    // try wgpu first there (DirectX 12, with a software fallback) and glow if that fails.
+    let renderers: &[eframe::Renderer] = if cfg!(windows) {
+        &[eframe::Renderer::Wgpu, eframe::Renderer::Glow]
+    } else {
+        &[eframe::Renderer::Glow]
     };
-    eframe::run_native(
-        APP_NAME,
-        options,
-        Box::new(move |cc| {
-            // `--open <folder or ISO>` starts on that disc instead of the one in the drive.
-            let open = args.iter().position(|a| a == "--open").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-            let mut app = RipperApp::new(&cc.egui_ctx, screenshot, open.is_none());
-            if let Some(path) = open {
-                app.open_source(&cc.egui_ctx, path);
-            }
-            // `--tab settings|about|formats` opens on that screen (handy for screenshots).
-            match args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).map(String::as_str) {
-                Some("settings") => app.tab = Tab::Settings,
-                Some("about") => app.tab = Tab::About,
-                Some("formats") => app.picker_open = true,
-                Some("preview") => app.preview_on_load = true,
-                _ => {}
-            }
-            Ok(Box::new(app))
-        }),
-    )
+    let mut errors = Vec::new();
+    for &renderer in renderers {
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_title(format!("{APP_NAME} — DVD & Blu-ray Ripper"))
+                .with_inner_size([1120.0, 720.0])
+                .with_min_inner_size([860.0, 560.0]),
+            renderer,
+            ..Default::default()
+        };
+        let args = args.clone();
+        let screenshot = screenshot.clone();
+        let result = eframe::run_native(
+            APP_NAME,
+            options,
+            Box::new(move |cc| {
+                // `--open <folder or ISO>` starts on that disc instead of the one in the drive.
+                let open = args.iter().position(|a| a == "--open").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+                let mut app = RipperApp::new(&cc.egui_ctx, screenshot, open.is_none());
+                if let Some(path) = open {
+                    app.open_source(&cc.egui_ctx, path);
+                }
+                // `--tab settings|about|formats` opens on that screen (handy for screenshots).
+                match args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).map(String::as_str) {
+                    Some("settings") => app.tab = Tab::Settings,
+                    Some("about") => app.tab = Tab::About,
+                    Some("formats") => app.picker_open = true,
+                    Some("preview") => app.preview_on_load = true,
+                    _ => {}
+                }
+                Ok(Box::new(app))
+            }),
+        );
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => errors.push(format!("{renderer:?}: {e}")),
+        }
+    }
+    show_error(&format!(
+        "OpenRip could not start its window.\n\n{}\n\nThis usually means the graphics driver \
+         does not support OpenGL 2.0+ or DirectX 12.",
+        errors.join("\n")
+    ));
+    Err(eframe::Error::AppCreation(errors.join("; ").into()))
+}
+
+fn show_error(message: &str) {
+    eprintln!("{message}");
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(APP_NAME)
+        .set_description(message)
+        .show();
 }
 
 // ---------------------------------------------------------------- colours

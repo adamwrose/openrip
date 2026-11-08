@@ -7,8 +7,8 @@ description = "Open-source DVD and Blu-ray ripper with a friendly interface, pow
 
 [dependencies]
 cpal = "0.18.2"
-# The lighter OpenGL renderer (glow) instead of wgpu: same look, far less to compile.
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "system_fonts", "wayland", "x11"] }
+# glow (OpenGL) is the default; wgpu is used on Windows, where VMs and basic drivers only offer OpenGL 1.1.
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wgpu", "links", "system_fonts", "wayland", "x11"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 libloading = "0.9.0"
 rfd = "0.17.2"
