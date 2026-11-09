@@ -20,6 +20,7 @@ DefaultDirName={autopf}\OpenRip
 DefaultGroupName=OpenRip
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\openrip.exe
+SetupIconFile=..\packaging\windows\openrip.ico
 OutputDir=output
 OutputBaseFilename=OpenRip-{#AppVersion}-setup
 Compression=lzma2

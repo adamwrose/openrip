@@ -64,6 +64,7 @@ fn main() -> eframe::Result {
                 .with_title(format!("{APP_NAME} — DVD & Blu-ray Ripper"))
                 // Lets Wayland and X11 match the window to its .desktop file and icon.
                 .with_app_id("io.github.adamwrose.OpenRip")
+                .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../packaging/windows/icon-256.png")).expect("app icon"))
                 .with_inner_size([1120.0, 720.0])
                 .with_min_inner_size([860.0, 560.0]),
             renderer,
