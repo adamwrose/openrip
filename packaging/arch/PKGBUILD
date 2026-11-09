@@ -14,7 +14,7 @@ optdepends=('libbluray: read Blu-ray discs'
             'wayland: native Wayland support'
             'libx11: X11 support')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP') # replace with the real sum once v0.2.6 is tagged: updpkgsums
+sha256sums=('a752164876b1d8bf4310cc25f2197714bb0abaeaf1d743ec4fc9ccaddcd26bab')
 
 prepare() {
   cd "$pkgname-$pkgver"

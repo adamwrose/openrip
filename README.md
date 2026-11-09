@@ -21,6 +21,10 @@ flatpak install --user openrip-linux-x86_64.flatpak
 flatpak run io.github.adamwrose.OpenRip
 ```
 
+On Arch Linux, download `openrip-linux-x86_64.pkg.tar.zst` from the releases page and install it
+with `sudo pacman -U openrip-linux-x86_64.pkg.tar.zst`. To build it yourself, run `makepkg -si`
+in `packaging/arch`.
+
 To build the Flatpak yourself, run `packaging/flatpak/build.sh` (needs `flatpak-builder`).
 Inside the Flatpak, mount `.iso` images yourself and open the mounted folder; the app can't
 mount them from the sandbox. Put `keydb.cfg` in `~/.config/aacs/` as usual.
