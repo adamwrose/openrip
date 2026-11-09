@@ -1,6 +1,6 @@
 # Maintainer: Adam Rose <adamwrose@gmail.com>
 pkgname=openrip
-pkgver=0.2.6
+pkgver=0.2.7
 pkgrel=1
 pkgdesc='Open-source DVD and Blu-ray ripper with a friendly interface, powered by FFmpeg'
 arch=('x86_64' 'aarch64')
