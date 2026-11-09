@@ -64,7 +64,7 @@ jobs:
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/openrip dist/
-          cp README.md dist/
+          cp README.md LICENSE-MIT LICENSE-APACHE dist/
           if [ "$RUNNER_OS" = Linux ]; then cp packaging/linux/* dist/; fi
           tar -czf openrip-${{ matrix.name }}.tar.gz -C dist .
       - name: Package (Windows)

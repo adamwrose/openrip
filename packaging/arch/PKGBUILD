@@ -1,0 +1,48 @@
+# Maintainer: Adam Rose <adamwrose@gmail.com>
+pkgname=openrip
+pkgver=0.2.6
+pkgrel=1
+pkgdesc='Open-source DVD and Blu-ray ripper with a friendly interface, powered by FFmpeg'
+arch=('x86_64' 'aarch64')
+url='https://github.com/adamwrose/openrip'
+license=('MIT' 'Apache-2.0')
+depends=('ffmpeg' 'alsa-lib' 'libxkbcommon' 'libglvnd' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+optdepends=('libbluray: read Blu-ray discs'
+            'libaacs: decrypt AACS-protected Blu-rays (you must supply your own ~/.config/aacs/keydb.cfg)'
+            'udisks2: open .iso disc images'
+            'wayland: native Wayland support'
+            'libx11: X11 support')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP') # replace with the real sum once v0.2.6 is tagged: updpkgsums
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local id=io.github.adamwrose.OpenRip
+  install -Dm755 target/release/openrip "$pkgdir/usr/bin/openrip"
+  install -Dm644 "packaging/linux/$id.desktop" "$pkgdir/usr/share/applications/$id.desktop"
+  install -Dm644 "packaging/linux/$id.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/$id.svg"
+  install -Dm644 "packaging/linux/$id.metainfo.xml" "$pkgdir/usr/share/metainfo/$id.metainfo.xml"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 installer/THIRD-PARTY.txt "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY.txt"
+  install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}
