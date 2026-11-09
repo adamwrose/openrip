@@ -36,6 +36,7 @@ fn find_lib(files: &[&str]) -> Option<PathBuf> {
     dirs.extend(["/opt/homebrew/lib", "/usr/local/lib", "/opt/local/lib"].map(PathBuf::from));
     #[cfg(target_os = "linux")]
     dirs.extend([
+        "/app/lib", // inside the Flatpak
         "/usr/local/lib",
         "/usr/local/lib64",
         "/lib",

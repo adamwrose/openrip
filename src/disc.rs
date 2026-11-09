@@ -212,9 +212,20 @@ pub fn mounted_discs() -> Vec<MountedDisc> {
     roots.push(PathBuf::from("/Volumes"));
     #[cfg(target_os = "linux")]
     {
-        if let Some(user) = std::env::var_os("USER") {
-            roots.push(PathBuf::from("/media").join(&user));
-            roots.push(PathBuf::from("/run/media").join(user));
+        // USER isn't always set (e.g. inside a Flatpak), so fall back to LOGNAME, then to every user's folder.
+        let user = std::env::var_os("USER").or_else(|| std::env::var_os("LOGNAME"));
+        match user {
+            Some(user) => {
+                roots.push(PathBuf::from("/media").join(&user));
+                roots.push(PathBuf::from("/run/media").join(user));
+            }
+            None => {
+                for base in ["/media", "/run/media"] {
+                    if let Ok(dir) = std::fs::read_dir(base) {
+                        roots.extend(dir.flatten().map(|e| e.path()));
+                    }
+                }
+            }
         }
         roots.push(PathBuf::from("/mnt"));
     }
@@ -281,7 +292,13 @@ fn mount_iso(iso: &Path) -> Result<PathBuf, String> {
         .arg(iso)
         .arg("--no-user-interaction")
         .output()
-        .map_err(|e| format!("Couldn't mount the image (install udisks2): {e}"))?;
+        .map_err(|e| {
+            if Path::new("/.flatpak-info").exists() {
+                "Disc images can't be mounted from inside the Flatpak. Mount the .iso yourself (for example by opening it in your file manager) and open the mounted folder instead.".to_string()
+            } else {
+                format!("Couldn't mount the image (install udisks2): {e}")
+            }
+        })?;
     if !loop_device.status.success() {
         return Err(format!("Couldn't set up the image: {}", String::from_utf8_lossy(&loop_device.stderr).trim()));
     }

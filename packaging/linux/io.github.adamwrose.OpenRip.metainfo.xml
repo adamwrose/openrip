@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.adamwrose.OpenRip</id>
+  <name>OpenRip</name>
+  <summary>Rip DVDs and Blu-rays with a friendly interface</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <launchable type="desktop-id">io.github.adamwrose.OpenRip.desktop</launchable>
+  <url type="homepage">https://github.com/adamwrose/openrip</url>
+  <url type="bugtracker">https://github.com/adamwrose/openrip/issues</url>
+  <description>
+    <p>OpenRip is an open-source DVD and Blu-ray ripper powered by FFmpeg. Pick a disc, choose the titles you want, and save them as MP4 or MKV (H.264 or HEVC), with hardware encoding when your graphics card supports it.</p>
+    <p>Copy-protected Blu-rays can be read through libbluray and libaacs if you supply your own keydb.cfg key file. Only rip discs you own, and check the laws in your country about copy protection.</p>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/adamwrose/openrip/master/shots/main.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <categories><category>AudioVideo</category><category>Video</category></categories>
+  <releases>
+    <release version="0.2.5" date="2026-11-08"/>
+  </releases>
+</component>

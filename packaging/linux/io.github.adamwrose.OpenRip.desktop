@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenRip
+GenericName=DVD & Blu-ray Ripper
+Comment=Rip DVDs and Blu-rays to MP4 or MKV
+Exec=openrip
+Icon=io.github.adamwrose.OpenRip
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=dvd;bluray;blu-ray;rip;ripper;ffmpeg;
+StartupWMClass=io.github.adamwrose.OpenRip

@@ -8,6 +8,23 @@ An open-source DVD and Blu-ray ripper with a friendly interface, powered by FFmp
 - Rust (2024 edition) to build from source: `cargo run --release`
 - On Linux, `udisks2` to open ISO images
 
+## Installing on Linux
+
+Download `openrip-linux-x86_64.tar.gz` from the releases page, unpack it and run
+`./install.sh` (installs to `~/.local`; use `sudo ./install.sh` for `/usr/local`).
+`./uninstall.sh` removes it. You still need FFmpeg from your package manager.
+
+Or install the Flatpak, which bundles FFmpeg, libbluray and libaacs:
+
+```
+flatpak install --user openrip-linux-x86_64.flatpak
+flatpak run io.github.adamwrose.OpenRip
+```
+
+To build the Flatpak yourself, run `packaging/flatpak/build.sh` (needs `flatpak-builder`).
+Inside the Flatpak, mount `.iso` images yourself and open the mounted folder; the app can't
+mount them from the sandbox. Put `keydb.cfg` in `~/.config/aacs/` as usual.
+
 ## Command line
 
 Run `openrip` with no arguments to open the window, or use it from a terminal:

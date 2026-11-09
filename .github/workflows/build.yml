@@ -65,6 +65,7 @@ jobs:
           mkdir dist
           cp target/${{ matrix.target }}/release/openrip dist/
           cp README.md dist/
+          if [ "$RUNNER_OS" = Linux ]; then cp packaging/linux/* dist/; fi
           tar -czf openrip-${{ matrix.name }}.tar.gz -C dist .
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -154,10 +155,36 @@ jobs:
           path: installer/output/*.exe
           if-no-files-found: error
 
+  flatpak:
+    name: Flatpak
+    needs: test
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the Cargo sources list
+        run: |
+          pip install aiohttp tomlkit PyYAML
+          curl -sSLf -o /tmp/fcg.py https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+          python3 /tmp/fcg.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: OpenRip.flatpak
+          manifest-path: packaging/flatpak/io.github.adamwrose.OpenRip.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+      - run: mv OpenRip.flatpak openrip-linux-x86_64.flatpak
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrip-flatpak
+          path: openrip-linux-x86_64.flatpak
+          if-no-files-found: error
+
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, windows-installer]
+    needs: [build, windows-installer, flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write

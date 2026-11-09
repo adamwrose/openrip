@@ -1,0 +1,134 @@
+app-id: io.github.adamwrose.OpenRip
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: openrip
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio          # preview audio
+  - --device=dri                 # OpenGL, VAAPI / hardware encoding
+  - --device=all                 # optical drives (/dev/sr*) and NVENC
+  - --filesystem=xdg-videos      # default place for ripped files
+  - --filesystem=/run/media      # discs and images mounted by the desktop
+  - --filesystem=/media
+  - --filesystem=xdg-config/aacs:ro   # your keydb.cfg, for copy-protected Blu-rays
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  - name: nasm
+    buildsystem: autotools
+    cleanup: ['*']
+    sources:
+      - type: archive
+        url: https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.xz
+        sha256: 1412a1c760bbd05db026b6c0d1657affd6631cd0a63cddb6f73cc6d4aa616148
+        x-checker-data:
+          type: anitya
+          project-id: 2007
+          url-template: https://www.nasm.us/pub/nasm/releasebuilds/$version/nasm-$version.tar.xz
+
+  - name: x264
+    buildsystem: autotools
+    config-opts: [--enable-shared, --disable-cli]
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        branch: stable
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+
+  - name: x265
+    buildsystem: cmake-ninja
+    subdir: source
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_CLI=OFF
+      - -DENABLE_SHARED=ON
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    sources:
+      - type: archive
+        url: https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.1.tar.gz
+        sha256: a31699c6a89806b74b0151e5e6a7df65de4b49050482fe5ebf8a4379d7af8f29
+      # x265 4.1 sets CMP0025/CMP0054 to OLD, which current CMake refuses.
+      - type: shell
+        commands:
+          - sed -i -E 's/(cmake_policy\(SET CMP00(25|54)) OLD\)/\1 NEW)/' source/CMakeLists.txt
+
+  - name: ffmpeg
+    cleanup: [/include, /lib/pkgconfig, /share/ffmpeg/examples, /share/man]
+    config-opts:
+      - --enable-gpl
+      - --enable-shared
+      - --disable-static
+      - --disable-doc
+      - --disable-debug
+      - --enable-libx264
+      - --enable-libx265
+      - --enable-vaapi
+      - --enable-pic
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+        sha256: 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
+
+  - name: libgpg-error
+    config-opts: [--disable-static, --disable-doc, --disable-tests]
+    cleanup: [/bin, /include, /lib/pkgconfig, /share]
+    sources:
+      - type: archive
+        url: https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.51.tar.bz2
+        sha256: be0f1b2db6b93eed55369cdf79f19f72750c8c7c39fc20b577e724545427e6b2
+
+  - name: libgcrypt
+    config-opts: [--disable-static, --disable-doc]
+    cleanup: [/bin, /include, /lib/pkgconfig, /share]
+    sources:
+      - type: archive
+        url: https://www.gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.10.3.tar.bz2
+        sha256: 8b0870897ac5ac67ded568dcfadf45969cfa8a6beb0fd60af2a9eadc2a3272aa
+
+  - name: libaacs
+    config-opts: [--disable-static]
+    cleanup: [/include, /lib/pkgconfig, /bin]
+    sources:
+      - type: archive
+        url: https://download.videolan.org/pub/videolan/libaacs/0.11.1/libaacs-0.11.1.tar.bz2
+        sha256: a88aa0ebe4c98a77f7aeffd92ab3ef64ac548c6b822e8248a8b926725bea0a39
+
+  - name: libbluray
+    config-opts:
+      - --disable-static
+      - --disable-bdjava-jar
+      - --disable-examples
+      - --disable-doxygen-doc
+      - --without-fontconfig
+      - --without-freetype
+      - --without-libxml2
+    cleanup: [/include, /lib/pkgconfig, /bin]
+    sources:
+      - type: archive
+        url: https://download.videolan.org/pub/videolan/libbluray/1.3.4/libbluray-1.3.4.tar.bz2
+        sha256: 478ffd68a0f5dde8ef6ca989b7f035b5a0a22c599142e5cd3ff7b03bbebe5f2b
+
+  - name: openrip
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/openrip/cargo
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/openrip /app/bin/openrip
+      - install -Dm644 packaging/linux/io.github.adamwrose.OpenRip.desktop /app/share/applications/io.github.adamwrose.OpenRip.desktop
+      - install -Dm644 packaging/linux/io.github.adamwrose.OpenRip.svg /app/share/icons/hicolor/scalable/apps/io.github.adamwrose.OpenRip.svg
+      - install -Dm644 packaging/linux/io.github.adamwrose.OpenRip.metainfo.xml /app/share/metainfo/io.github.adamwrose.OpenRip.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+        skip: [target, .git, .flatpak-builder, build-dir]
+      - cargo-sources.json
