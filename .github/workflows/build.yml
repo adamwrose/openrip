@@ -172,6 +172,7 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: OpenRip.flatpak
+          upload-artifact: false
           manifest-path: packaging/flatpak/io.github.adamwrose.OpenRip.yml
           cache-key: flatpak-builder-${{ github.sha }}
       - run: mv OpenRip.flatpak openrip-linux-x86_64.flatpak
