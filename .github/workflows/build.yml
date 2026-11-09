@@ -207,7 +207,7 @@ jobs:
           chown -R builder:builder /home/builder/pkg
           su builder -c "cd ~/pkg && makepkg -f --nodeps"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          cp /home/builder/pkg/*.pkg.tar.zst "$GITHUB_WORKSPACE/out/openrip-linux-x86_64.pkg.tar.zst"
+          cp /home/builder/pkg/openrip-[0-9]*.pkg.tar.zst "$GITHUB_WORKSPACE/out/openrip-linux-x86_64.pkg.tar.zst"
       - uses: actions/upload-artifact@v4
         with:
           name: openrip-arch-package
