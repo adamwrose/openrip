@@ -1,6 +1,6 @@
 # Maintainer: Adam Rose <adamwrose@gmail.com>
 pkgname=openrip
-pkgver=0.2.7
+pkgver=0.2.8
 pkgrel=1
 pkgdesc='Open-source DVD and Blu-ray ripper with a friendly interface, powered by FFmpeg'
 arch=('x86_64' 'aarch64')
@@ -14,7 +14,7 @@ optdepends=('libbluray: read Blu-ray discs'
             'wayland: native Wayland support'
             'libx11: X11 support')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('a752164876b1d8bf4310cc25f2197714bb0abaeaf1d743ec4fc9ccaddcd26bab')
+sha256sums=('9234a9623f769389d7a7e158300d5dd9f766f02754bbd631894c7690bc535e7a')
 
 prepare() {
   cd "$pkgname-$pkgver"
