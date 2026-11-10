@@ -7,3 +7,4 @@
 /packaging/flatpak/*.flatpak
 /packaging/flatpak/cargo-sources.json
 /packaging/flatpak/flatpak-cargo-generator.py
+*.swp
