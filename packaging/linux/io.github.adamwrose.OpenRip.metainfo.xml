@@ -20,6 +20,6 @@
   <content_rating type="oars-1.1"/>
   <categories><category>AudioVideo</category><category>Video</category></categories>
   <releases>
-    <release version="0.2.7" date="2026-11-08"/>
+    <release version="0.2.8" date="2026-11-10"/>
   </releases>
 </component>
